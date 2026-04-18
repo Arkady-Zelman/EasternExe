@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { getSupabaseServerClient } from "@/lib/supabase/server";
+import { runAgent } from "@/lib/agent/main";
+import type { ChatRoom } from "@/types/db";
 
 export const runtime = "nodejs";
 
@@ -15,6 +17,8 @@ const bodySchema = z.object({
   content: z.string().min(1).max(8000),
   parent_message_id: z.string().uuid().nullable().optional(),
 });
+
+const AGENT_MENTION = /@agent\b/i;
 
 export async function POST(req: Request) {
   let body: unknown;
@@ -33,7 +37,9 @@ export async function POST(req: Request) {
   }
 
   const supabase = getSupabaseServerClient();
-  const { data, error } = await supabase
+
+  // Insert the user message first
+  const { data: inserted, error } = await supabase
     .from("chat_messages")
     .insert({
       room_id: parsed.data.room_id,
@@ -46,15 +52,56 @@ export async function POST(req: Request) {
     .select()
     .single();
 
-  if (error || !data) {
+  if (error || !inserted) {
     return NextResponse.json(
       { error: error?.message ?? "Could not insert message" },
       { status: 500 }
     );
   }
 
-  // TODO(M6): if sender_type === 'user' and content matches /@agent\b/i
-  // in a group room, kick off /api/agent asynchronously here.
+  // Agent trigger: only on user messages.
+  if (parsed.data.sender_type === "user") {
+    const { data: roomData } = await supabase
+      .from("chat_rooms")
+      .select("*")
+      .eq("id", parsed.data.room_id)
+      .maybeSingle();
+    const room = roomData as ChatRoom | null;
 
-  return NextResponse.json({ message: data });
+    const shouldTrigger =
+      room &&
+      ((room.type === "group" && AGENT_MENTION.test(parsed.data.content)) ||
+        (room.type === "agent" &&
+          room.owner_id === parsed.data.sender_participant_id));
+
+    if (shouldTrigger && room) {
+      const { data: placeholder } = await supabase
+        .from("chat_messages")
+        .insert({
+          room_id: room.id,
+          sender_type: "agent",
+          sender_label: "Agent",
+          content: "",
+          thinking_state: "thinking",
+          parent_message_id: (inserted as { id: string }).id,
+        })
+        .select()
+        .single();
+
+      if (placeholder) {
+        // Fire-and-forget. The agent pipeline updates the placeholder row
+        // in-place; clients see the progress via realtime.
+        void runAgent({
+          tripId: room.trip_id,
+          roomId: room.id,
+          placeholderMessageId: (placeholder as { id: string }).id,
+          triggerMessageId: (inserted as { id: string }).id,
+        }).catch((e) => {
+          console.error("runAgent crashed:", e);
+        });
+      }
+    }
+  }
+
+  return NextResponse.json({ message: inserted });
 }
