@@ -1,0 +1,174 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+
+import { getSupabaseBrowserClient } from "@/lib/supabase/client";
+import type { ChatMessage, SenderType, ThinkingState } from "@/types/db";
+
+export interface OptimisticMessage extends ChatMessage {
+  optimistic?: boolean;
+  failed?: boolean;
+}
+
+interface SendArgs {
+  content: string;
+  senderParticipantId: string | null;
+  senderType?: SenderType;
+  senderLabel?: string | null;
+  parentMessageId?: string | null;
+}
+
+const INITIAL_LIMIT = 100;
+
+export function useChatMessages(roomId: string | undefined) {
+  const [messages, setMessages] = useState<OptimisticMessage[]>([]);
+  const [loading, setLoading] = useState(true);
+  const mergedIds = useRef<Set<string>>(new Set());
+
+  const mergeIn = useCallback((next: OptimisticMessage[]) => {
+    setMessages((prev) => {
+      const map = new Map<string, OptimisticMessage>();
+      for (const m of prev) map.set(m.id, m);
+      for (const m of next) {
+        // If the server-sent row matches an optimistic placeholder by content+sender,
+        // drop the optimistic first.
+        if (!m.optimistic && !mergedIds.current.has(m.id)) {
+          for (const [k, v] of map) {
+            if (
+              v.optimistic &&
+              v.content === m.content &&
+              v.sender_participant_id === m.sender_participant_id
+            ) {
+              map.delete(k);
+            }
+          }
+        }
+        map.set(m.id, m);
+        mergedIds.current.add(m.id);
+      }
+      return Array.from(map.values()).sort(
+        (a, b) => +new Date(a.created_at) - +new Date(b.created_at)
+      );
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!roomId) return;
+    let active = true;
+    const supabase = getSupabaseBrowserClient();
+    mergedIds.current = new Set();
+
+    (async () => {
+      setLoading(true);
+      const { data, error } = await supabase
+        .from("chat_messages")
+        .select("*")
+        .eq("room_id", roomId)
+        .order("created_at", { ascending: true })
+        .limit(INITIAL_LIMIT);
+      if (!active) return;
+      if (error) {
+        console.error("Failed to load messages:", error);
+      } else if (data) {
+        mergeIn(data as OptimisticMessage[]);
+      }
+      setLoading(false);
+    })();
+
+    const channel = supabase
+      .channel(`chat:${roomId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "chat_messages",
+          filter: `room_id=eq.${roomId}`,
+        },
+        (payload) => mergeIn([payload.new as OptimisticMessage])
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "chat_messages",
+          filter: `room_id=eq.${roomId}`,
+        },
+        (payload) => mergeIn([payload.new as OptimisticMessage])
+      )
+      .subscribe();
+
+    return () => {
+      active = false;
+      supabase.removeChannel(channel);
+    };
+  }, [roomId, mergeIn]);
+
+  const send = useCallback(
+    async ({
+      content,
+      senderParticipantId,
+      senderType = "user",
+      senderLabel = null,
+      parentMessageId = null,
+    }: SendArgs) => {
+      if (!roomId || !content.trim()) return;
+
+      const tempId = `optimistic-${crypto.randomUUID()}`;
+      const now = new Date().toISOString();
+
+      const optimistic: OptimisticMessage = {
+        id: tempId,
+        room_id: roomId,
+        sender_participant_id: senderParticipantId,
+        sender_type: senderType,
+        sender_label: senderLabel,
+        content: content.trim(),
+        attachments: [],
+        parent_message_id: parentMessageId,
+        shared_from_room_id: null,
+        shared_by_participant_id: null,
+        thinking_state: null,
+        tool_calls: [],
+        metadata: {},
+        created_at: now,
+        optimistic: true,
+      };
+      setMessages((prev) =>
+        [...prev, optimistic].sort(
+          (a, b) => +new Date(a.created_at) - +new Date(b.created_at)
+        )
+      );
+
+      try {
+        const res = await fetch("/api/messages", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            room_id: roomId,
+            content: content.trim(),
+            sender_participant_id: senderParticipantId,
+            sender_type: senderType,
+            parent_message_id: parentMessageId,
+          }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.error ?? `Send failed (${res.status})`);
+        }
+        // Realtime INSERT will deliver the canonical row; mergeIn dedupes.
+      } catch (e) {
+        console.error("send failed:", e);
+        setMessages((prev) =>
+          prev.map((m) => (m.id === tempId ? { ...m, failed: true } : m))
+        );
+      }
+    },
+    [roomId]
+  );
+
+  return { messages, loading, send } as const;
+}
+
+export type { ThinkingState };
