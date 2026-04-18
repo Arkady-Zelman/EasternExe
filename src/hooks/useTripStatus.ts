@@ -70,8 +70,26 @@ export function useTripStatus(tripId: string | undefined, initialTrip?: Trip) {
       )
       .subscribe();
 
+    // Polling fallback. If Realtime isn't toggled on `trips`/`uploads` in the
+    // Supabase dashboard, the subscription is silent — so every 5s we re-
+    // fetch. Once trip.status === 'ready' we stop polling.
+    const pollHandle = setInterval(async () => {
+      if (!active) return;
+      const [{ data: t }, { data: u }] = await Promise.all([
+        supabase.from("trips").select("*").eq("id", tripId).maybeSingle(),
+        supabase.from("uploads").select("*").eq("trip_id", tripId),
+      ]);
+      if (!active) return;
+      if (t) setTrip(t as Trip);
+      if (u) setUploads(u as Upload[]);
+      if ((t as Trip | null)?.status === "ready") {
+        clearInterval(pollHandle);
+      }
+    }, 5000);
+
     return () => {
       active = false;
+      clearInterval(pollHandle);
       supabase.removeChannel(channel);
     };
   }, [tripId]);
