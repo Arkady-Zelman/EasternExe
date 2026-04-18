@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Send } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -10,12 +10,28 @@ interface Props {
   placeholder?: string;
   onSend: (content: string) => Promise<void> | void;
   disabled?: boolean;
+  /** Incrementing key that re-triggers the prefill; paired with `prefillContent`. */
+  prefillKey?: number;
+  prefillContent?: string;
 }
 
-export function ChatInput({ placeholder, onSend, disabled }: Props) {
+export function ChatInput({
+  placeholder,
+  onSend,
+  disabled,
+  prefillKey,
+  prefillContent,
+}: Props) {
   const [value, setValue] = useState("");
   const [sending, setSending] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (prefillKey && prefillContent) {
+      setValue(prefillContent);
+      requestAnimationFrame(() => ref.current?.focus());
+    }
+  }, [prefillKey, prefillContent]);
 
   const submit = async () => {
     const trimmed = value.trim();

@@ -7,10 +7,12 @@ import { ChatInput } from "@/components/chat/ChatInput";
 import { MessageList } from "@/components/chat/MessageList";
 import { TabsShell, type WorkspaceTab } from "@/components/workspace/TabsShell";
 import { IngestProgress } from "@/components/workspace/IngestProgress";
+import { TripMap } from "@/components/map/TripMap";
 import { useChatMessages } from "@/hooks/useChatMessages";
 import { useParticipant } from "@/hooks/useParticipant";
+import { useRealtimePlaces } from "@/hooks/useRealtimePlaces";
 import { useTripStatus } from "@/hooks/useTripStatus";
-import type { Participant, Trip } from "@/types/db";
+import type { Participant, Place, Trip } from "@/types/db";
 
 interface Props {
   trip: Trip;
@@ -31,6 +33,21 @@ export function TripWorkspace({
 
   const { trip: liveTrip, uploads } = useTripStatus(initialTrip.id, initialTrip);
   const trip = liveTrip ?? initialTrip;
+
+  const { places } = useRealtimePlaces(initialTrip.id);
+
+  const [prefill, setPrefill] = useState<{ key: number; text: string }>({
+    key: 0,
+    text: "",
+  });
+
+  const askAgentAbout = (place: Place) => {
+    setTab("me");
+    setPrefill((p) => ({
+      key: p.key + 1,
+      text: `Tell me about ${place.name}.`,
+    }));
+  };
 
   const participantMap = useMemo(() => {
     return Object.fromEntries(participants.map((p) => [p.id, p]));
@@ -120,17 +137,18 @@ export function TripWorkspace({
               })
             }
             disabled={!activeRoomId || !participantId}
+            prefillKey={tab === "me" ? prefill.key : undefined}
+            prefillContent={prefill.text}
           />
         </div>
       ) : (
-        <div className="flex flex-1 items-center justify-center p-6 pb-20 text-center">
-          <div className="max-w-sm">
-            <h3 className="text-base font-semibold">Map</h3>
-            <p className="mt-2 text-sm text-muted-foreground">
-              The place map lands in milestone 7. Pins will appear here from
-              WhatsApp mentions, docs, and agent suggestions.
-            </p>
-          </div>
+        <div className="flex min-h-0 flex-1 flex-col pb-14 sm:pb-0">
+          <TripMap
+            trip={trip}
+            places={places}
+            participants={participants}
+            onAskAgent={askAgentAbout}
+          />
         </div>
       )}
 
