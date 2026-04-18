@@ -6,8 +6,10 @@ import { useRouter } from "next/navigation";
 import { ChatInput } from "@/components/chat/ChatInput";
 import { MessageList } from "@/components/chat/MessageList";
 import { TabsShell, type WorkspaceTab } from "@/components/workspace/TabsShell";
+import { IngestProgress } from "@/components/workspace/IngestProgress";
 import { useChatMessages } from "@/hooks/useChatMessages";
 import { useParticipant } from "@/hooks/useParticipant";
+import { useTripStatus } from "@/hooks/useTripStatus";
 import type { Participant, Trip } from "@/types/db";
 
 interface Props {
@@ -18,14 +20,17 @@ interface Props {
 }
 
 export function TripWorkspace({
-  trip,
+  trip: initialTrip,
   participants,
   groupRoomId,
   agentRoomsByParticipant,
 }: Props) {
   const router = useRouter();
-  const { participantId, hydrated } = useParticipant(trip.id);
+  const { participantId, hydrated } = useParticipant(initialTrip.id);
   const [tab, setTab] = useState<WorkspaceTab>("group");
+
+  const { trip: liveTrip, uploads } = useTripStatus(initialTrip.id, initialTrip);
+  const trip = liveTrip ?? initialTrip;
 
   const participantMap = useMemo(() => {
     return Object.fromEntries(participants.map((p) => [p.id, p]));
@@ -128,6 +133,10 @@ export function TripWorkspace({
           </div>
         </div>
       )}
+
+      {trip.status !== "ready" ? (
+        <IngestProgress trip={trip} uploads={uploads} />
+      ) : null}
     </main>
   );
 }

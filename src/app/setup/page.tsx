@@ -251,6 +251,14 @@ export default function SetupPage() {
         }
       }
 
+      setSubmitMessage("Starting ingestion…");
+      // Fire-and-forget: the server pipeline awaits LLM + Whisper + Places
+      // calls, which take 30–120s. We don't block the UI.
+      void fetch(`/api/ingest/${trip.id}`, {
+        method: "POST",
+        keepalive: true,
+      }).catch(() => undefined);
+
       setSubmitMessage("Opening workspace…");
       router.push(`/trip/${trip.id}`);
     } catch (e: unknown) {
