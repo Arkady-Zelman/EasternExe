@@ -1,7 +1,15 @@
 "use client";
 
-import { CheckCircle2, Loader2, AlertCircle, FileIcon } from "lucide-react";
+import { useState } from "react";
+import {
+  CheckCircle2,
+  Loader2,
+  AlertCircle,
+  FileIcon,
+  RotateCw,
+} from "lucide-react";
 
+import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import type { Trip, Upload } from "@/types/db";
 
@@ -21,6 +29,9 @@ function statusIcon(status: Upload["status"]) {
 }
 
 export function IngestProgress({ trip, uploads }: Props) {
+  const [retrying, setRetrying] = useState(false);
+  const [retryError, setRetryError] = useState<string | null>(null);
+
   const total = uploads.length;
   const done = uploads.filter(
     (u) => u.status === "processed" || u.status === "failed"
@@ -33,6 +44,23 @@ export function IngestProgress({ trip, uploads }: Props) {
         : 20;
 
   const isError = trip.status === "error";
+
+  const retry = async () => {
+    setRetrying(true);
+    setRetryError(null);
+    try {
+      const res = await fetch(`/api/ingest/${trip.id}`, { method: "POST" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error ?? `Retry failed (${res.status})`);
+      }
+    } catch (e) {
+      setRetryError(e instanceof Error ? e.message : "Unknown error");
+      setRetrying(false);
+    }
+    // On success, trips.status flips back to 'ingesting' via realtime; the
+    // overlay will re-render from scratch.
+  };
 
   return (
     <div className="fixed inset-0 z-30 flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm">
@@ -80,9 +108,35 @@ export function IngestProgress({ trip, uploads }: Props) {
           </ul>
         ) : null}
 
+        {isError ? (
+          <div className="space-y-2">
+            <Button
+              type="button"
+              onClick={retry}
+              disabled={retrying}
+              className="w-full"
+            >
+              {retrying ? (
+                <>
+                  <Loader2 className="animate-spin" /> Retrying…
+                </>
+              ) : (
+                <>
+                  <RotateCw /> Retry ingestion
+                </>
+              )}
+            </Button>
+            {retryError ? (
+              <p className="text-center text-[11px] text-destructive">
+                {retryError}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+
         <p className="text-center text-[11px] text-muted-foreground">
           {isError
-            ? "Chat + map will stay empty until this succeeds."
+            ? "Chat + map stay empty until this succeeds."
             : "You can keep this tab open — updates arrive in realtime."}
         </p>
       </div>
