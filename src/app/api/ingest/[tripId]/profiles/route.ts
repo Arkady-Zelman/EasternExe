@@ -10,9 +10,8 @@ export const runtime = "nodejs";
 export const maxDuration = 60;
 
 /**
- * Per-participant profile generation. Self-chains one participant at a time
- * so each LLM call gets its own 60s budget. `?i=N` is the index into the
- * trip's participants (ordered by created_at).
+ * Profile generation for all participants in parallel. Each participant's
+ * LLM call runs concurrently via Promise.all, then chains to memory.
  */
 export async function POST(
   req: Request,
@@ -22,18 +21,14 @@ export async function POST(
     return NextResponse.json({ error: "tripId required" }, { status: 400 });
   }
 
-  const idx = Number.parseInt(
-    new URL(req.url).searchParams.get("i") ?? "0",
-    10
-  );
-
   chainStep(req, params.tripId, async () => {
     const participantIds = await listParticipantIds(params.tripId);
-    if (idx >= participantIds.length) {
-      return `/api/ingest/${params.tripId}/memory`;
-    }
-    await runProfileForParticipant(params.tripId, participantIds[idx]);
-    return `/api/ingest/${params.tripId}/profiles?i=${idx + 1}`;
+    await Promise.all(
+      participantIds.map((pid) =>
+        runProfileForParticipant(params.tripId, pid)
+      )
+    );
+    return `/api/ingest/${params.tripId}/memory`;
   });
 
   return NextResponse.json({ ok: true }, { status: 202 });
