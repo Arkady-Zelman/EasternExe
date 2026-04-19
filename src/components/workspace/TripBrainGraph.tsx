@@ -3,11 +3,19 @@
 import dynamic from "next/dynamic";
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
-import { Brain, Loader2, RefreshCw, Sparkles } from "lucide-react";
+import {
+  Brain,
+  Loader2,
+  Maximize2,
+  Minimize2,
+  RefreshCw,
+  Sparkles,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { useActivations } from "@/hooks/useActivations";
 import { useTripGraph } from "@/hooks/useTripGraph";
+import { cn } from "@/lib/utils";
 import type { KGNode } from "@/lib/graph/types";
 import type { Trip } from "@/types/db";
 
@@ -100,6 +108,17 @@ export function TripBrainGraph({ trip }: { trip: Trip }) {
   const [busy, setBusy] = useState(false);
   const [summarizing, setSummarizing] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
+
+  // ESC closes the fullscreen overlay — standard modal behavior.
+  useEffect(() => {
+    if (!expanded) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setExpanded(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [expanded]);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
 
@@ -341,8 +360,19 @@ export function TripBrainGraph({ trip }: { trip: Trip }) {
     }
   };
 
-  return (
-    <div className="flex h-full w-full flex-col">
+  const panel = (
+    <div
+      className={cn(
+        "flex flex-col",
+        // Docked: fill the sidebar slot. Popup: sit as a centered modal
+        // card over a dim backdrop so it reads as a genuine pop-up window
+        // (not a fullscreen takeover). The ResizeObserver on containerRef
+        // re-measures either way so the graph canvas fills its parent.
+        expanded
+          ? "h-[92vh] max-h-[92vh] w-[92vw] max-w-[1400px] overflow-hidden rounded-xl border bg-background shadow-2xl"
+          : "h-full w-full"
+      )}
+    >
       <div className="flex items-center justify-between border-b px-3 py-2">
         <div className="flex items-center gap-2">
           <Brain className="size-4 text-violet-500" />
@@ -382,6 +412,18 @@ export function TripBrainGraph({ trip }: { trip: Trip }) {
               <RefreshCw className="size-3.5" />
             )}
             <span className="ml-1 text-[11px]">Rebuild</span>
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => setExpanded((v) => !v)}
+            title={expanded ? "Collapse (Esc)" : "Expand to fullscreen"}
+          >
+            {expanded ? (
+              <Minimize2 className="size-3.5" />
+            ) : (
+              <Maximize2 className="size-3.5" />
+            )}
           </Button>
         </div>
       </div>
@@ -582,6 +624,28 @@ export function TripBrainGraph({ trip }: { trip: Trip }) {
       </div>
     </div>
   );
+
+  if (expanded) {
+    return (
+      <>
+        {/* Docked placeholder so the sidebar slot keeps its footprint
+            while the graph is popped out — prevents a layout jump. */}
+        <div className="flex h-full w-full items-center justify-center text-xs text-muted-foreground">
+          Graph opened in a pop-up window
+        </div>
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
+          onClick={() => setExpanded(false)}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div onClick={(e) => e.stopPropagation()}>{panel}</div>
+        </div>
+      </>
+    );
+  }
+
+  return panel;
 }
 
 function WikiPanel({
