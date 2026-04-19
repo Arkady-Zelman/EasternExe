@@ -60,6 +60,16 @@ export async function POST(req: Request) {
     }
   }
 
+  // The `places.source` column has a CHECK constraint (migrations/001_init.sql)
+  // limited to 'whatsapp'|'doc'|'agent'|'manual'|'ingest'. Our Zod schema
+  // exposes UX-friendly values ('nearby', 'events') that aren't in the enum —
+  // map them to 'manual' for the DB write so the insert doesn't 500.
+  // The richer provenance is implied by `added_by_agent` + the category.
+  const sourceForDb =
+    parsed.data.source === "nearby" || parsed.data.source === "events"
+      ? "manual"
+      : parsed.data.source;
+
   const { data, error } = await supabase
     .from("places")
     .insert({
@@ -70,7 +80,7 @@ export async function POST(req: Request) {
       google_place_id: parsed.data.google_place_id ?? null,
       category: parsed.data.category,
       notes: parsed.data.notes ?? null,
-      source: parsed.data.source,
+      source: sourceForDb,
       added_by_agent: parsed.data.source === "agent",
       status: "saved",
       time_of_day: "any",
