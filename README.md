@@ -1,5 +1,5 @@
 <img width="1464" height="772" alt="image" src="https://github.com/user-attachments/assets/d2a19606-24f2-4c09-a2c1-da873b6a40b0" />
-<img width="1468" height="773" alt="image" src="https://github.com/user-attachments/assets/604b16d1-b7b7-4843-8101-e7a6b26ea356" />
+<img width="1470" height="834" alt="image" src="https://github.com/user-attachments/assets/2f532c3b-ae3a-455b-bb8b-f394eb01f532" />
 
 # EasternExe
 
