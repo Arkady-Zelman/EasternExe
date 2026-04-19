@@ -13,6 +13,7 @@ import { NearbyPanel } from "@/components/workspace/NearbyPanel";
 import { EventsPanel } from "@/components/workspace/EventsPanel";
 import { TripMap } from "@/components/map/TripMap";
 import { useChatMessages } from "@/hooks/useChatMessages";
+import { useChatInactivityWatcher } from "@/hooks/useChatInactivityWatcher";
 import { useParticipant } from "@/hooks/useParticipant";
 import { useRealtimePlaces } from "@/hooks/useRealtimePlaces";
 import { useTripStatus } from "@/hooks/useTripStatus";
@@ -84,6 +85,15 @@ export function TripWorkspace({
 
   const { messages, loading: loadingMessages, send } =
     useChatMessages(activeRoomId);
+
+  // Group-room messages (may equal `messages` if we're on the group tab).
+  // Drives the 30-min inactivity watcher that triggers a graph summary.
+  const { messages: groupMessages } = useChatMessages(
+    activeRoomId === groupRoomId ? undefined : groupRoomId
+  );
+  const watchedMessages =
+    activeRoomId === groupRoomId ? messages : groupMessages;
+  useChatInactivityWatcher(trip.id, watchedMessages);
 
   if (hydrated && !participantId) {
     router.replace(`/trip/${trip.id}/join`);
@@ -233,7 +243,7 @@ export function TripWorkspace({
 
         {isChatTab ? (
           <aside className="hidden w-80 shrink-0 lg:flex lg:flex-col">
-            <TripBrainPanel tripId={trip.id} places={places} />
+            <TripBrainPanel trip={trip} places={places} />
           </aside>
         ) : null}
       </div>
