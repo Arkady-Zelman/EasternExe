@@ -41,7 +41,3 @@ next-env.d.ts
 /landing-mobile.png
 /setup-placeholder-desktop.png
 /run-*.png
-
-# session logs (local only; keep under /sessions/)
-/sessions/*
-!/sessions/README.md
