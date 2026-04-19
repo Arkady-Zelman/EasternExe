@@ -1,10 +1,12 @@
 import { NextResponse } from "next/server";
+import { waitUntil } from "@vercel/functions";
 import { z } from "zod";
 
 import { runAgent } from "@/lib/agent/main";
 
 export const runtime = "nodejs";
-export const maxDuration = 300;
+// Hobby plan caps serverless functions at 60s regardless of this value.
+export const maxDuration = 60;
 
 const bodySchema = z.object({
   tripId: z.string().uuid(),
@@ -28,9 +30,11 @@ export async function POST(req: Request) {
     );
   }
 
-  void runAgent(parsed.data).catch((e) => {
-    console.error("agent pipeline crashed:", e);
-  });
+  waitUntil(
+    runAgent(parsed.data).catch((e) => {
+      console.error("agent pipeline crashed:", e);
+    })
+  );
 
   return NextResponse.json({ ok: true }, { status: 202 });
 }
