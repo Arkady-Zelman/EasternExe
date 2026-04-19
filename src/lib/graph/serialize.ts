@@ -24,6 +24,7 @@ export function serializeGraph(
   const lines: string[] = [];
   const order: KGNode["kind"][] = [
     "trip",
+    "topic",
     "person",
     "constraint",
     "decision",

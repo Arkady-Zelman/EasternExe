@@ -37,7 +37,11 @@ export function agentPrivateContext(args: {
   groupRecentMessages: string;
   privateRecentMessages: string;
   ragChunks: string;
+  digestsBlock?: string;
 }): string {
+  const digestsSection = args.digestsBlock
+    ? `\nGroup chat flow so far (compacted — specifics pinned, prose summarized):\n${args.digestsBlock}\n`
+    : "";
   return `
 Talking to: ${args.participantName}
 
@@ -46,7 +50,7 @@ ${args.profileJson}
 
 Shared trip brain:
 ${args.tripMemoryJson}
-
+${digestsSection}
 Group chat context (read-only; don't quote back unless asked):
 ${args.groupRecentMessages}
 

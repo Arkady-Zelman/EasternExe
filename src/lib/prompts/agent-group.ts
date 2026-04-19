@@ -30,14 +30,18 @@ export function agentGroupContext(args: {
   participantsJson: string;
   recentMessages: string;
   ragChunks: string;
+  digestsBlock?: string;
 }): string {
+  const digestsSection = args.digestsBlock
+    ? `\nChat flow so far (compacted by day — specifics are pinned, prose is summarized):\n${args.digestsBlock}\n`
+    : "";
   return `
 Trip brain:
 ${args.tripMemoryJson}
 
 Participants:
 ${args.participantsJson}
-
+${digestsSection}
 Recent messages in this room (oldest first):
 ${args.recentMessages}
 

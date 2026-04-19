@@ -20,6 +20,7 @@ import {
 } from "@/lib/prompts/agent-private";
 import { computeGraphInMemory } from "@/lib/graph/build";
 import { serializeGraph } from "@/lib/graph/serialize";
+import { formatDigestsBlock } from "@/lib/chat/format-digests";
 import type { KGEdge, KGNode } from "@/lib/graph/types";
 import { getSupabaseServerClient } from "@/lib/supabase/server";
 import type {
@@ -212,6 +213,27 @@ export async function runAgent(args: RunAgentArgs): Promise<void> {
         .order("created_at", { ascending: true });
       const chunks = (chunkRows ?? []) as { id: string; content: string }[];
       ragChunks = concatChunks(chunks, 5000);
+    }
+
+    // Compacting chat-memory layer: pull the last ~5 daily digests so the
+    // agent sees the arc of the planning chat without dragging the full
+    // message log into context. Research (mem0/Letta/LangGraph) says
+    // structured fact-extraction beats pure summarization for recall of
+    // specifics (dates, names, numbers).
+    let digestsBlock = "";
+    {
+      const { data: digestsData } = await supabase
+        .from("chat_digests")
+        .select(
+          "window_start, window_end, message_count, topics_active, places_mentioned, decisions_noted, questions_raised, summary"
+        )
+        .eq("trip_id", args.tripId)
+        .order("window_start", { ascending: false })
+        .limit(5);
+      const digests = (digestsData ?? []) as Parameters<
+        typeof formatDigestsBlock
+      >[0];
+      digestsBlock = formatDigestsBlock(digests, { maxDigests: 5 });
     }
 
     // Knowledge graph — compute on the fly from source tables (no

@@ -183,9 +183,11 @@ function collectPending(args: {
     origin_id: tripOrigin,
   });
 
-  // 2. Person nodes — kept connected to trip only. No per-person preference
-  // nodes; individual likes now flow into topic hubs to avoid per-person
-  // clustering in the force layout.
+  // 2. Person nodes — NO direct person→trip edge. People connect to the
+  // graph purely through topics their preferences/styles/dealbreakers imply.
+  // This is what breaks the per-person sphere clustering: without a
+  // person→trip link (and without per-person pref nodes), the force layout
+  // no longer orbits participants around a personal hub.
   const profileByParticipant = new Map(
     args.profiles.map((p) => [p.participant_id, p])
   );
@@ -205,15 +207,21 @@ function collectPending(args: {
       origin_table: "participants",
       origin_id: personOrigin,
     });
-    edges.push({
-      src_origin: personOrigin,
-      dst_origin: tripOrigin,
-      relation: "PART_OF",
-    });
 
-    // Dealbreakers still produce constraint nodes, but attach to the dietary
-    // topic rather than to the person individually — keeps the graph honest
-    // about hard constraints without per-person gravity wells.
+    // Connect person → topic via everything we know about their preferences.
+    // Each attachTopic emits a single edge, so a person who likes food + has
+    // pescatarian dealbreaker sits near both the Food and Dietary hubs.
+    if (profile?.budget_style) attachTopic(personOrigin, profile.budget_style, "budget");
+    if (profile?.travel_style) attachTopic(personOrigin, profile.travel_style);
+    if (profile?.personality) attachTopic(personOrigin, profile.personality);
+    for (const item of profile?.interests ?? []) attachTopic(personOrigin, item);
+    for (const item of profile?.food_preferences ?? [])
+      attachTopic(personOrigin, item, "food");
+    for (const item of profile?.dislikes ?? []) attachTopic(personOrigin, item);
+
+    // Dealbreakers still become constraint nodes — they're too important to
+    // collapse. Anchored to the relevant topic (not the trip, not the
+    // person) so peers with the same dietary constraint cluster together.
     for (const db of profile?.dealbreakers ?? []) {
       const cOrigin = `constraint:${slug(db)}`;
       nodes.push({
@@ -224,17 +232,8 @@ function collectPending(args: {
         origin_table: "derived",
         origin_id: cOrigin,
       });
-      edges.push({
-        src_origin: tripOrigin,
-        dst_origin: cOrigin,
-        relation: "CONSTRAINED_BY",
-      });
       attachTopic(cOrigin, db, "dietary");
     }
-
-    // Person → topic edges based on budget_style / travel_style keywords.
-    if (profile?.budget_style) attachTopic(personOrigin, profile.budget_style, "budget");
-    if (profile?.travel_style) attachTopic(personOrigin, profile.travel_style);
   }
 
   // 3. Place nodes → ABOUT → topic hub. PROPOSED edges dropped so the force
@@ -270,10 +269,30 @@ function collectPending(args: {
     }
   }
 
-  // 4. Trip-memory items — connect to trip hub (so rebuild doesn't orphan
-  // them) AND to their inferred topic so topic clusters pull them together.
+  // 4. Trip-memory items — connect only to their inferred topic, NOT to
+  // the trip hub. This keeps the trip node from becoming a single over-
+  // connected super-hub. If inferTopic misses, the item falls through to a
+  // "general" topic so it stays in the graph.
   if (args.memory) {
     const m = args.memory;
+    const attachOrFallback = (origin: string, text: string) => {
+      const hit = inferTopic(text);
+      if (hit) {
+        topicsUsed.add(hit);
+        edges.push({
+          src_origin: origin,
+          dst_origin: topicOriginOf(hit),
+          relation: "ABOUT",
+        });
+      } else {
+        topicsUsed.add("general");
+        edges.push({
+          src_origin: origin,
+          dst_origin: topicOriginOf("general"),
+          relation: "ABOUT",
+        });
+      }
+    };
     for (const c of m.constraints ?? []) {
       const cOrigin = `constraint:${slug(c)}`;
       nodes.push({
@@ -284,12 +303,7 @@ function collectPending(args: {
         origin_table: "trip_memory",
         origin_id: cOrigin,
       });
-      edges.push({
-        src_origin: tripOrigin,
-        dst_origin: cOrigin,
-        relation: "CONSTRAINED_BY",
-      });
-      attachTopic(cOrigin, c);
+      attachOrFallback(cOrigin, c);
     }
     for (const d of m.decisions_made ?? []) {
       const dOrigin = `decision:${slug(d)}`;
@@ -301,12 +315,7 @@ function collectPending(args: {
         origin_table: "trip_memory",
         origin_id: dOrigin,
       });
-      edges.push({
-        src_origin: tripOrigin,
-        dst_origin: dOrigin,
-        relation: "DECIDED",
-      });
-      attachTopic(dOrigin, d);
+      attachOrFallback(dOrigin, d);
     }
     for (const q of m.open_questions ?? []) {
       const qOrigin = `question:${slug(q)}`;
@@ -318,12 +327,7 @@ function collectPending(args: {
         origin_table: "trip_memory",
         origin_id: qOrigin,
       });
-      edges.push({
-        src_origin: tripOrigin,
-        dst_origin: qOrigin,
-        relation: "ASKING",
-      });
-      attachTopic(qOrigin, q);
+      attachOrFallback(qOrigin, q);
     }
     for (const gp of m.group_preferences ?? []) {
       const pOrigin = `pref:group:${slug(gp)}`;
@@ -335,12 +339,7 @@ function collectPending(args: {
         origin_table: "trip_memory",
         origin_id: pOrigin,
       });
-      edges.push({
-        src_origin: tripOrigin,
-        dst_origin: pOrigin,
-        relation: "SUPPORTS",
-      });
-      attachTopic(pOrigin, gp);
+      attachOrFallback(pOrigin, gp);
     }
     for (const t of m.tensions ?? []) {
       const tOrigin = `tension:${slug(t)}`;
@@ -352,24 +351,22 @@ function collectPending(args: {
         origin_table: "trip_memory",
         origin_id: tOrigin,
       });
-      edges.push({
-        src_origin: tripOrigin,
-        dst_origin: tOrigin,
-        relation: "TENSION_BETWEEN",
-      });
-      attachTopic(tOrigin, t);
+      attachOrFallback(tOrigin, t);
     }
   }
 
   // 5. Emit topic hub nodes for every topic that was referenced. Connect
   // each topic to the trip so they sit near the root rather than floating.
+  // "general" is a catch-all for items that miss every keyword pattern.
+  const topicLabelFor = (id: string): string => {
+    if (id === "general") return "General";
+    return TOPICS.find((t) => t.id === id)?.label ?? id;
+  };
   for (const topicId of topicsUsed) {
-    const meta = TOPICS.find((t) => t.id === topicId);
-    if (!meta) continue;
     const tOrigin = topicOriginOf(topicId);
     nodes.push({
       kind: "topic",
-      label: meta.label,
+      label: topicLabelFor(topicId),
       properties: { id: topicId },
       importance: 0.75,
       origin_table: "derived",
