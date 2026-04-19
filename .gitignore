@@ -41,6 +41,3 @@ next-env.d.ts
 /landing-mobile.png
 /setup-placeholder-desktop.png
 /run-*.png
-
-# session notes
-SESSION_*.md
