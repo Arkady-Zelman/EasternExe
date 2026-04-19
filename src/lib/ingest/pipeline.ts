@@ -206,6 +206,33 @@ export async function runIngestion(tripId: string): Promise<void> {
       .eq("status", "pending");
     const uploads = (uploadsData ?? []) as Upload[];
 
+    // Fast path — trip has zero source material. Skip the 4+ LLM calls that
+    // would otherwise run on empty context (slow, hallucinatory, and on
+    // Hobby's 60s cap risks timing out before we ever set status to ready).
+    if (uploads.length === 0) {
+      if (trip.destination) {
+        try {
+          const geo = await geocodeDestination(trip.destination);
+          if (geo) {
+            await supabase
+              .from("trips")
+              .update({
+                destination_lat: geo.lat,
+                destination_lng: geo.lng,
+              })
+              .eq("id", tripId);
+          }
+        } catch (e) {
+          console.warn("Destination geocode failed:", e);
+        }
+      }
+      await setTripStatus(supabase, tripId, "ready");
+      console.log(
+        `Ingestion short-circuited for ${tripId} (no uploads) in ${Math.round((Date.now() - startedAt) / 1000)}s`
+      );
+      return;
+    }
+
     // Step 1 — per-upload extraction
     const extractedTexts: ExtractedText[] = [];
 
