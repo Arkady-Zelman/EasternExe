@@ -360,15 +360,16 @@ export function TripBrainGraph({ trip }: { trip: Trip }) {
     }
   };
 
-  return (
+  const panel = (
     <div
       className={cn(
         "flex flex-col",
-        // When expanded, lift the entire panel out of its sidebar slot and
-        // cover the viewport. The ResizeObserver on containerRef re-measures
-        // automatically so the graph canvas fills the new dimensions.
+        // Docked: fill the sidebar slot. Popup: sit as a centered modal
+        // card over a dim backdrop so it reads as a genuine pop-up window
+        // (not a fullscreen takeover). The ResizeObserver on containerRef
+        // re-measures either way so the graph canvas fills its parent.
         expanded
-          ? "fixed inset-0 z-50 h-screen w-screen bg-background shadow-2xl"
+          ? "h-[92vh] max-h-[92vh] w-[92vw] max-w-[1400px] overflow-hidden rounded-xl border bg-background shadow-2xl"
           : "h-full w-full"
       )}
     >
@@ -623,6 +624,28 @@ export function TripBrainGraph({ trip }: { trip: Trip }) {
       </div>
     </div>
   );
+
+  if (expanded) {
+    return (
+      <>
+        {/* Docked placeholder so the sidebar slot keeps its footprint
+            while the graph is popped out — prevents a layout jump. */}
+        <div className="flex h-full w-full items-center justify-center text-xs text-muted-foreground">
+          Graph opened in a pop-up window
+        </div>
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
+          onClick={() => setExpanded(false)}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div onClick={(e) => e.stopPropagation()}>{panel}</div>
+        </div>
+      </>
+    );
+  }
+
+  return panel;
 }
 
 function WikiPanel({
