@@ -1,13 +1,21 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 import type { Trip, Upload } from "@/types/db";
 
+const RESUME_AFTER_MS = 20_000;
+const RESUME_COOLDOWN_MS = 30_000;
+
 export function useTripStatus(tripId: string | undefined, initialTrip?: Trip) {
   const [trip, setTrip] = useState<Trip | undefined>(initialTrip);
   const [uploads, setUploads] = useState<Upload[]>([]);
+
+  // Resume logic: track when we first saw ingesting, and when we last
+  // fired a resume call (to avoid spamming on every render).
+  const ingestStartRef = useRef<number | null>(null);
+  const lastResumeRef = useRef<number>(0);
 
   useEffect(() => {
     if (!tripId) return;
@@ -108,6 +116,32 @@ export function useTripStatus(tripId: string | undefined, initialTrip?: Trip) {
       supabase.removeChannel(channel);
     };
   }, [tripId]);
+
+  // Resume: if trip is ingesting and has been for >20s without completing,
+  // fire the resume endpoint once. The endpoint is idempotent.
+  const tripStatus = trip?.status;
+  useEffect(() => {
+    if (!tripId) return;
+
+    if (tripStatus === "ingesting") {
+      if (!ingestStartRef.current) {
+        ingestStartRef.current = Date.now();
+      }
+
+      const elapsed = Date.now() - ingestStartRef.current;
+      const sinceLastResume = Date.now() - lastResumeRef.current;
+
+      if (elapsed >= RESUME_AFTER_MS && sinceLastResume >= RESUME_COOLDOWN_MS) {
+        lastResumeRef.current = Date.now();
+        fetch(`/api/ingest/${tripId}/resume`, { method: "POST" }).catch(
+          (e) => console.error("auto-resume failed:", e)
+        );
+      }
+    } else {
+      // Trip left ingesting state — reset the timer for next time
+      ingestStartRef.current = null;
+    }
+  }, [tripId, tripStatus]);
 
   return { trip, uploads };
 }
