@@ -35,8 +35,6 @@ import type {
 const HISTORY_LIMIT = 20;
 const MAX_TURNS = 5;
 
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-
 function getTimeOfDay(): string {
   const hour = new Date().getHours();
   if (hour >= 5 && hour < 11) return "morning";
@@ -253,25 +251,46 @@ export async function runAgent(args: RunAgentArgs): Promise<void> {
           )
         : "";
     if (kgNodes.length > 0) {
-      // Phased waves so the viz cascades visibly as the agent reads the brain.
-      // 1) Trip hub + participants, 2) constraints + preferences, 3) decisions
-      //    + questions + tensions, 4) places. ~120ms between waves.
-      const orderGroups = [
-        new Set(["trip", "person"]),
-        new Set(["constraint", "preference"]),
-        new Set(["decision", "question", "tension"]),
-        new Set(["place"]),
-      ];
-      for (let i = 0; i < orderGroups.length; i++) {
-        const wave = kgNodes
-          .filter((n) => orderGroups[i].has(n.kind))
-          .map((n) => n.id);
-        if (wave.length === 0) continue;
+      // Only light up nodes that are actually relevant to the user's
+      // message. Previous behavior broadcast EVERY node in phased waves,
+      // which turned the viz into decoration — user complaint: "all nodes
+      // light up it should only be the ones that are relevant."
+      //
+      // Relevance rule: extract tokens (4+ chars) from the trigger
+      // message, find nodes whose label contains any token, then include
+      // their 1-hop neighbors so the subgraph reads as a connected piece
+      // rather than disconnected dots.
+      const userText = (triggerMsg.content ?? "").toLowerCase();
+      const userTokens = Array.from(
+        new Set(
+          userText
+            .split(/[^a-z0-9]+/)
+            .filter((t) => t.length >= 4)
+        )
+      );
+
+      const hitIds = new Set<string>();
+      if (userTokens.length > 0) {
+        for (const n of kgNodes) {
+          const label = (n.label ?? "").toLowerCase();
+          if (userTokens.some((tok) => label.includes(tok))) {
+            hitIds.add(n.id);
+          }
+        }
+      }
+
+      // 1-hop expansion, but only if we have any hits at all. No hits →
+      // broadcast nothing (don't light up the whole graph as a fallback).
+      if (hitIds.size > 0) {
+        const expanded = new Set(hitIds);
+        for (const e of kgEdges) {
+          if (hitIds.has(e.src_id)) expanded.add(e.dst_id);
+          if (hitIds.has(e.dst_id)) expanded.add(e.src_id);
+        }
         await broadcastActivations(
-          wave,
-          `Wave ${i + 1} · ${Array.from(orderGroups[i]).join("/")}`
+          Array.from(expanded),
+          `Relevant to "${triggerMsg.content.slice(0, 60)}"`
         );
-        if (i < orderGroups.length - 1) await sleep(120);
       }
     }
 

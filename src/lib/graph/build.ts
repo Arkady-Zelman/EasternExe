@@ -556,10 +556,11 @@ function collectPending(args: {
   const orderedDays = dayOrder.filter((d) => daysUsed.has(d));
   for (const dayId of orderedDays) {
     const label = DAY_PATTERNS.find((d) => d.id === dayId)?.label ?? dayId;
+    const dayIndex = orderedDays.indexOf(dayId);
     nodes.push({
       kind: "day",
       label,
-      properties: { id: dayId },
+      properties: { id: dayId, day_index: dayIndex },
       importance: 0.7,
       origin_table: "derived",
       origin_id: dayOriginOf(dayId),
@@ -578,6 +579,33 @@ function collectPending(args: {
       relation: "NEXT_DAY",
       weight: 0.7,
     });
+  }
+
+  // 7. Propagate a day_index onto every node that has a SCHEDULED_ON
+  // edge to a day. Multi-day nodes get the EARLIEST day's index so they
+  // stack onto the first plane they touch (with cross-day edges visibly
+  // spanning the layers). Nodes with no day get day_index = -1, which
+  // the frontend parks on an "unscheduled" plane above the stack.
+  const dayIndexById = new Map<string, number>();
+  for (const dayId of orderedDays) {
+    dayIndexById.set(dayOriginOf(dayId), orderedDays.indexOf(dayId));
+  }
+  const nodeDayIndex = new Map<string, number>();
+  for (const e of edges) {
+    if (e.relation !== "SCHEDULED_ON") continue;
+    const di = dayIndexById.get(e.dst_origin);
+    if (di == null) continue;
+    const prev = nodeDayIndex.get(e.src_origin);
+    if (prev == null || di < prev) nodeDayIndex.set(e.src_origin, di);
+  }
+  for (const n of nodes) {
+    const di =
+      n.kind === "day"
+        ? (n.properties?.day_index as number | undefined)
+        : nodeDayIndex.get(n.origin_id);
+    if (typeof di === "number") {
+      n.properties = { ...(n.properties ?? {}), day_index: di };
+    }
   }
 
   return { nodes, edges };

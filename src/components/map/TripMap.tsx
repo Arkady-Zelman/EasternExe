@@ -118,9 +118,51 @@ export function TripMap({
     [places, filter]
   );
 
-  // Prefer centroid of places so we frame the actual content, fall back to
-  // trip destination, fall back to Tokyo.
+  // Center on the trip destination first, then use the centroid ONLY of
+  // places within ~50km of the destination. Otherwise a single bad geocode
+  // (e.g., "4RAU DELUXE Barber" resolving to Vietnam) yanks the map view
+  // across continents — which is exactly what happened on the London trip.
   const { initialLat, initialLng } = useMemo(() => {
+    const destLat = trip.destination_lat ?? null;
+    const destLng = trip.destination_lng ?? null;
+
+    // Haversine km between (lat1,lng1) and (lat2,lng2).
+    const kmBetween = (
+      lat1: number,
+      lng1: number,
+      lat2: number,
+      lng2: number
+    ): number => {
+      const R = 6371;
+      const toRad = (x: number) => (x * Math.PI) / 180;
+      const dLat = toRad(lat2 - lat1);
+      const dLng = toRad(lng2 - lng1);
+      const a =
+        Math.sin(dLat / 2) ** 2 +
+        Math.cos(toRad(lat1)) *
+          Math.cos(toRad(lat2)) *
+          Math.sin(dLng / 2) ** 2;
+      return 2 * R * Math.asin(Math.sqrt(a));
+    };
+
+    if (destLat != null && destLng != null) {
+      const nearby = places.filter(
+        (p) =>
+          p.lat != null &&
+          p.lng != null &&
+          kmBetween(destLat, destLng, p.lat, p.lng) <= 50
+      );
+      if (nearby.length > 0) {
+        const lat =
+          nearby.reduce((s, p) => s + (p.lat as number), 0) / nearby.length;
+        const lng =
+          nearby.reduce((s, p) => s + (p.lng as number), 0) / nearby.length;
+        return { initialLat: lat, initialLng: lng };
+      }
+      return { initialLat: destLat, initialLng: destLng };
+    }
+
+    // No destination coords — fall back to places centroid, then Tokyo.
     const withCoords = places.filter(
       (p) => p.lat != null && p.lng != null
     );
@@ -133,10 +175,7 @@ export function TripMap({
         withCoords.length;
       return { initialLat: lat, initialLng: lng };
     }
-    return {
-      initialLat: trip.destination_lat ?? 35.6762,
-      initialLng: trip.destination_lng ?? 139.6503,
-    };
+    return { initialLat: 35.6762, initialLng: 139.6503 };
   }, [places, trip.destination_lat, trip.destination_lng]);
 
   if (!token) {

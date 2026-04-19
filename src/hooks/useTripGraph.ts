@@ -9,11 +9,24 @@ import type { KGEdge, KGNode } from "@/lib/graph/types";
 // keeps it fresh without a Realtime subscription on nonexistent tables.
 const POLL_INTERVAL_MS = 10000;
 
+/**
+ * Cheap content signature — id + updated_at for nodes, id for edges.
+ * Used to skip setState when the server returns an identical graph, so
+ * the downstream force-layout doesn't reheat on every 10s poll.
+ */
+function signature(ns: KGNode[], es: KGEdge[]): string {
+  // Keep this O(n); for small graphs (<1k nodes) it's microseconds.
+  const n = ns.map((x) => `${x.id}:${x.updated_at}`).join("|");
+  const e = es.map((x) => x.id).join("|");
+  return `${ns.length}:${es.length}:${n}::${e}`;
+}
+
 export function useTripGraph(tripId: string | undefined) {
   const [nodes, setNodes] = useState<KGNode[]>([]);
   const [edges, setEdges] = useState<KGEdge[]>([]);
   const [loading, setLoading] = useState(true);
   const pollRef = useRef<ReturnType<typeof setInterval>>();
+  const sigRef = useRef<string>("");
 
   const fetchAll = useCallback(async () => {
     if (!tripId) return;
@@ -25,8 +38,17 @@ export function useTripGraph(tripId: string | undefined) {
         nodes?: KGNode[];
         edges?: KGEdge[];
       };
-      if (body.nodes) setNodes(body.nodes);
-      if (body.edges) setEdges(body.edges);
+      const nextNodes = body.nodes ?? [];
+      const nextEdges = body.edges ?? [];
+      const sig = signature(nextNodes, nextEdges);
+      // Skip setState when the graph hasn't actually changed. This is
+      // the fix for the force-layout reheating on every 10s poll —
+      // without it, identical data produced new array references that
+      // kicked d3-force's alpha back to 1 every time.
+      if (sig === sigRef.current) return;
+      sigRef.current = sig;
+      setNodes(nextNodes);
+      setEdges(nextEdges);
     } catch (e) {
       console.error("useTripGraph fetch failed:", e);
     }

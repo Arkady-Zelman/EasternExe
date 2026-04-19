@@ -60,7 +60,14 @@ const TOPIC_RING_RADIUS = 260;
 // get lost inside the topic ring.
 const DAY_RING_RADIUS = 140;
 
-const LAYER_SPACING = 80; // distance between day layers on the z-axis
+// 3D day-axis — each calendar day gets its own Z-plane. Nodes scheduled
+// on a day stack onto that day's plane. Topic hubs float on a meta-plane
+// above everything. Unscheduled nodes sit on a "general" plane between
+// the topic meta-plane and the earliest day.
+const LAYER_SPACING = 140;
+const TOPIC_PLANE_Z = -400; // topics hover above the day stack
+const UNSCHEDULED_PLANE_Z = -200;
+
 const GLOW_MS = 1800; // how long a node stays "hot" after activation
 
 interface GraphNode {
@@ -86,12 +93,6 @@ interface GraphLink {
   strength: number;
 }
 
-function dayIndexOf(createdAt: string, tripStart: Date): number {
-  const t = new Date(createdAt).getTime();
-  const ms = t - tripStart.getTime();
-  const day = Math.floor(ms / (1000 * 60 * 60 * 24));
-  return Math.max(day, 0);
-}
 
 export function TripBrainGraph({ trip }: { trip: Trip }) {
   const { nodes, edges, loading, rebuild } = useTripGraph(trip.id);
@@ -121,6 +122,16 @@ export function TripBrainGraph({ trip }: { trip: Trip }) {
     d3Force?: (name: string) => { strength?: (n: number) => void } | undefined;
   }>();
 
+  // Persistent positions across rebuilds. Every time the simulation
+  // settles (onEngineStop) we copy the live (x,y,z) into this ref, and
+  // every time we rebuild GraphNode objects we re-apply them as (fx,fy,
+  // fz). This is what makes the layout actually static: d3-force starts
+  // with every node already at its pinned position, so there's nothing
+  // to solve on re-render.
+  const pinnedPositions = useRef<
+    Map<string, { x: number; y: number; z: number; dayIndex: number }>
+  >(new Map());
+
   // Auto-rebuild once if the graph is empty on first mount.
   const autoRebuiltRef = useRef(false);
   useEffect(() => {
@@ -130,11 +141,6 @@ export function TripBrainGraph({ trip }: { trip: Trip }) {
       rebuild();
     }
   }, [loading, nodes.length, rebuild]);
-
-  const tripStart = useMemo(() => {
-    if (trip.start_date) return new Date(trip.start_date);
-    return new Date(trip.created_at);
-  }, [trip.start_date, trip.created_at]);
 
   // Activation glow state uses a ref for the ticking `now` value so the 4Hz
   // interval never triggers a re-render of the ForceGraph subtree. Without
@@ -189,12 +195,26 @@ export function TripBrainGraph({ trip }: { trip: Trip }) {
       .map((n) => n.id)
       .sort();
 
-    let minDay = Infinity;
-    let maxDay = -Infinity;
-    const gn: GraphNode[] = nodes.map((n: KGNode) => {
-      const di = dayIndexOf(n.created_at, tripStart);
+    // Read the server-computed day_index on each node's properties.
+    // Nodes with a SCHEDULED_ON edge to a day inherit that day's index;
+    // the rest get -1 (unscheduled plane). See src/lib/graph/build.ts
+    // step 7 where propagation happens.
+    const dayIndexOfNode = (n: KGNode): number => {
+      const v = (n.properties as { day_index?: unknown } | null)?.day_index;
+      return typeof v === "number" ? v : -1;
+    };
+
+    let minDay = 0;
+    let maxDay = 0;
+    for (const n of nodes) {
+      const di = dayIndexOfNode(n);
+      if (di < 0) continue;
       if (di < minDay) minDay = di;
       if (di > maxDay) maxDay = di;
+    }
+
+    const gn: GraphNode[] = nodes.map((n: KGNode) => {
+      const di = dayIndexOfNode(n);
       const deg = degree.get(n.id) ?? 0;
       const base: GraphNode = {
         id: n.id,
@@ -203,36 +223,52 @@ export function TripBrainGraph({ trip }: { trip: Trip }) {
         importance: n.importance,
         dayIndex: di,
         color: KIND_COLOR[n.kind] ?? "#94a3b8",
-        // val combines importance + log(degree) so hubs read as hubs
-        // without an explicit kind branch.
         val: 2 + n.importance * 5 + Math.log2(1 + deg) * 1.6,
         degree: deg,
       };
 
-      // Pin the trip root at origin, topics on an outer ring, days on an
-      // inner ring. Everything else floats freely. The z-axis is still
-      // used for the "day layers" on free nodes but we zero it on the
-      // pinned hubs so the ring skeleton is planar.
+      // Z-plane: day-index-based stacking. Topics sit on a meta-plane
+      // above the whole stack. Unscheduled nodes (di = -1) go on their
+      // own plane just below the topic plane.
+      const zForDayIndex =
+        di >= 0 ? di * LAYER_SPACING : UNSCHEDULED_PLANE_Z;
+
       if (n.kind === "trip") {
         base.fx = 0;
         base.fy = 0;
-        base.fz = 0;
+        base.fz = TOPIC_PLANE_Z;
       } else if (n.kind === "topic") {
         const idx = topicIds.indexOf(n.id);
         const total = Math.max(topicIds.length, 1);
         const angle = (idx / total) * Math.PI * 2;
         base.fx = Math.cos(angle) * TOPIC_RING_RADIUS;
         base.fy = Math.sin(angle) * TOPIC_RING_RADIUS;
-        base.fz = 0;
+        base.fz = TOPIC_PLANE_Z;
       } else if (n.kind === "day") {
         const idx = dayIds.indexOf(n.id);
         const total = Math.max(dayIds.length, 1);
         const angle = (idx / total) * Math.PI * 2 + Math.PI / total;
         base.fx = Math.cos(angle) * DAY_RING_RADIUS;
         base.fy = Math.sin(angle) * DAY_RING_RADIUS;
-        base.fz = 0;
+        // Each day node anchors its own Z-plane. Non-day nodes scheduled
+        // on that day stack onto the same plane.
+        base.fz = zForDayIndex;
       } else {
-        base.fz = di * LAYER_SPACING;
+        // X/Y floats free so sibling edges (NEAR / SAME_DAY) shape the
+        // cluster within the plane; Z is pinned to the day layer so the
+        // layers visibly stack in 3D.
+        base.fz = zForDayIndex;
+      }
+
+      // If we've remembered a position from a prior settle, restore it —
+      // but only if the day index hasn't changed. A node moving to a new
+      // day plane must re-layout; otherwise reuse the settled position so
+      // renders don't restart the sim.
+      const saved = pinnedPositions.current.get(n.id);
+      if (saved && saved.dayIndex === di) {
+        base.fx = saved.x;
+        base.fy = saved.y;
+        base.fz = saved.z;
       }
       return base;
     });
@@ -258,7 +294,7 @@ export function TripBrainGraph({ trip }: { trip: Trip }) {
           ? { min: minDay, max: maxDay }
           : { min: 0, max: 0 },
     };
-  }, [nodes, edges, tripStart]);
+  }, [nodes, edges]);
 
   // Neighbor set for focus+context. Memoized against selection + edges so
   // clicking a node dims the rest of the graph without reheating forces.
@@ -504,10 +540,13 @@ export function TripBrainGraph({ trip }: { trip: Trip }) {
                 | {
                     graphData?: () => {
                       nodes: Array<{
+                        id: string;
                         x: number;
                         y: number;
+                        z?: number;
                         fx?: number;
                         fy?: number;
+                        fz?: number;
                       }>;
                     };
                   }
@@ -515,8 +554,19 @@ export function TripBrainGraph({ trip }: { trip: Trip }) {
               const data = fg?.graphData?.();
               if (!data) return;
               for (const n of data.nodes) {
-                if (n.fx == null && typeof n.x === "number") n.fx = n.x;
-                if (n.fy == null && typeof n.y === "number") n.fy = n.y;
+                if (typeof n.x !== "number" || typeof n.y !== "number") continue;
+                // Pin the live node so d3-force can't move it further, AND
+                // remember it in the ref so that the next time we recompute
+                // graphNodes (e.g. because an unrelated setState fired) we
+                // can re-apply fx/fy/fz to the fresh objects.
+                n.fx = n.x;
+                n.fy = n.y;
+                if (typeof n.z === "number") n.fz = n.z;
+                pinnedPositions.current.set(n.id, {
+                  x: n.x,
+                  y: n.y,
+                  z: typeof n.z === "number" ? n.z : 0,
+                });
               }
             }}
             showNavInfo={false}
