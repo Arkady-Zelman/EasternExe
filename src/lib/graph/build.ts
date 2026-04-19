@@ -139,6 +139,49 @@ function placeCategoryToTopic(category: string | null | undefined): string | nul
   }
 }
 
+/**
+ * Day of week detection from free text (place.notes, decisions). A
+ * given note can mention multiple days ("Saturday or Sunday") — we emit
+ * an edge for each hit. Matches both full ("Tuesday") and abbreviated
+ * ("Tue") forms plus ordinal phrases.
+ */
+const DAY_PATTERNS: { id: string; label: string; pattern: RegExp }[] = [
+  { id: "day_mon", label: "Mon", pattern: /\b(monday|mon\b)/i },
+  { id: "day_tue", label: "Tue", pattern: /\b(tuesday|tue\b|tues\b)/i },
+  { id: "day_wed", label: "Wed", pattern: /\b(wednesday|wed\b)/i },
+  { id: "day_thu", label: "Thu", pattern: /\b(thursday|thu\b|thur\b|thurs\b)/i },
+  { id: "day_fri", label: "Fri", pattern: /\b(friday|fri\b)/i },
+  { id: "day_sat", label: "Sat", pattern: /\b(saturday|sat\b)/i },
+  { id: "day_sun", label: "Sun", pattern: /\b(sunday|sun\b)/i },
+];
+
+function inferDays(text: string | null | undefined): string[] {
+  if (!text) return [];
+  const hits: string[] = [];
+  for (const d of DAY_PATTERNS) if (d.pattern.test(text)) hits.push(d.id);
+  return hits;
+}
+
+/** Haversine distance in meters, for NEAR sibling edges. */
+function distanceMeters(
+  a: { lat: number | null; lng: number | null },
+  b: { lat: number | null; lng: number | null }
+): number {
+  if (a.lat == null || a.lng == null || b.lat == null || b.lng == null) {
+    return Infinity;
+  }
+  const R = 6371000;
+  const toRad = (x: number) => (x * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLon = toRad(b.lng - a.lng);
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
 function collectPending(args: {
   trip: Trip;
   participants: Participant[];
@@ -238,6 +281,17 @@ function collectPending(args: {
 
   // 3. Place nodes → ABOUT → topic hub. PROPOSED edges dropped so the force
   // layout no longer orbits each place around its champion.
+  const daysUsed = new Set<string>();
+  const dayOriginOf = (dayId: string) => `day:${dayId}`;
+
+  interface PlaceIndex {
+    origin: string;
+    place: Place;
+    days: string[];
+    timeOfDay: string | null;
+  }
+  const placeIndex: PlaceIndex[] = [];
+
   for (const place of args.places) {
     const placeOrigin = `place:${place.id}`;
     nodes.push({
@@ -264,8 +318,105 @@ function collectPending(args: {
         relation: "ABOUT",
       });
     } else {
-      // If there's no category, fall back to keyword inference on the name.
       attachTopic(placeOrigin, place.name);
+    }
+
+    // Day attachment from notes (e.g., "Thu lunch", "Sunday roast").
+    const placeDays = inferDays(`${place.name} ${place.notes ?? ""}`);
+    for (const dayId of placeDays) {
+      daysUsed.add(dayId);
+      edges.push({
+        src_origin: placeOrigin,
+        dst_origin: dayOriginOf(dayId),
+        relation: "SCHEDULED_ON",
+      });
+    }
+
+    placeIndex.push({
+      origin: placeOrigin,
+      place,
+      days: placeDays,
+      timeOfDay:
+        place.time_of_day && place.time_of_day !== "any"
+          ? place.time_of_day
+          : null,
+    });
+  }
+
+  // 3b. Sparse sibling edges between places — topic hubs alone produce
+  // a star-graph hairball. Research (GraphRAG, LeanRAG) says the fix is
+  // typed + capped cross-links. Rules:
+  //
+  //   NEAR (≤600m)          weight 0.55, max 2 per place
+  //   SAME_DAY              weight 0.45, max 1 per place
+  //   SAME_TIME_OF_DAY      weight 0.25, max 1 per place
+  //
+  // Caps are enforced by degree, so we pick each place's closest peers.
+  const NEAR_METERS = 600;
+  const NEAR_CAP = 2;
+  const SAME_DAY_CAP = 1;
+  const SAME_TOD_CAP = 1;
+
+  // Precompute pairwise distances for all places with coords.
+  for (let i = 0; i < placeIndex.length; i++) {
+    const a = placeIndex[i];
+    // NEAR — pick up to NEAR_CAP closest places under threshold.
+    const nearCandidates: { other: PlaceIndex; dist: number }[] = [];
+    for (let j = 0; j < placeIndex.length; j++) {
+      if (i === j) continue;
+      const b = placeIndex[j];
+      const d = distanceMeters(a.place, b.place);
+      if (d <= NEAR_METERS) nearCandidates.push({ other: b, dist: d });
+    }
+    nearCandidates.sort((x, y) => x.dist - y.dist);
+    const pickedNear = nearCandidates.slice(0, NEAR_CAP);
+    for (const c of pickedNear) {
+      // Undirected — only emit if a.origin < c.origin to avoid duplicates.
+      if (a.origin < c.other.origin) {
+        edges.push({
+          src_origin: a.origin,
+          dst_origin: c.other.origin,
+          relation: "NEAR",
+          weight: 0.55,
+          properties: { distance_m: Math.round(c.dist) },
+        });
+      }
+    }
+
+    // SAME_DAY — first candidate per day.
+    if (a.days.length > 0) {
+      const sameDayCandidates = placeIndex.filter(
+        (b) =>
+          b.origin !== a.origin &&
+          b.origin > a.origin &&
+          b.days.some((d) => a.days.includes(d))
+      );
+      for (const b of sameDayCandidates.slice(0, SAME_DAY_CAP)) {
+        edges.push({
+          src_origin: a.origin,
+          dst_origin: b.origin,
+          relation: "SAME_DAY",
+          weight: 0.45,
+        });
+      }
+    }
+
+    // SAME_TIME_OF_DAY — cheap slot-chaining.
+    if (a.timeOfDay) {
+      const sameTodCandidates = placeIndex.filter(
+        (b) =>
+          b.origin !== a.origin &&
+          b.origin > a.origin &&
+          b.timeOfDay === a.timeOfDay
+      );
+      for (const b of sameTodCandidates.slice(0, SAME_TOD_CAP)) {
+        edges.push({
+          src_origin: a.origin,
+          dst_origin: b.origin,
+          relation: "SAME_TIME_OF_DAY",
+          weight: 0.25,
+        });
+      }
     }
   }
 
@@ -316,6 +467,17 @@ function collectPending(args: {
         origin_id: dOrigin,
       });
       attachOrFallback(dOrigin, d);
+      // Also edge decision → day if it mentions a day explicitly
+      // ("booked Friday 7:30pm", "Sunday roast"), so Travel/Plan slices
+      // have temporal anchors without waiting on the LLM.
+      for (const dayId of inferDays(d)) {
+        daysUsed.add(dayId);
+        edges.push({
+          src_origin: dOrigin,
+          dst_origin: dayOriginOf(dayId),
+          relation: "SCHEDULED_ON",
+        });
+      }
     }
     for (const q of m.open_questions ?? []) {
       const qOrigin = `question:${slug(q)}`;
@@ -328,6 +490,14 @@ function collectPending(args: {
         origin_id: qOrigin,
       });
       attachOrFallback(qOrigin, q);
+      for (const dayId of inferDays(q)) {
+        daysUsed.add(dayId);
+        edges.push({
+          src_origin: qOrigin,
+          dst_origin: dayOriginOf(dayId),
+          relation: "SCHEDULED_ON",
+        });
+      }
     }
     for (const gp of m.group_preferences ?? []) {
       const pOrigin = `pref:group:${slug(gp)}`;
@@ -376,6 +546,37 @@ function collectPending(args: {
       src_origin: tOrigin,
       dst_origin: tripOrigin,
       relation: "PART_OF",
+    });
+  }
+
+  // 6. Emit Day nodes and chain them NEXT_DAY. Days provide the itinerary
+  // spine — user questions like "what's on Thursday?" traverse in one hop
+  // from the Day hub instead of string-scanning every place's notes.
+  const dayOrder = DAY_PATTERNS.map((d) => d.id); // Mon…Sun canonical order
+  const orderedDays = dayOrder.filter((d) => daysUsed.has(d));
+  for (const dayId of orderedDays) {
+    const label = DAY_PATTERNS.find((d) => d.id === dayId)?.label ?? dayId;
+    nodes.push({
+      kind: "day",
+      label,
+      properties: { id: dayId },
+      importance: 0.7,
+      origin_table: "derived",
+      origin_id: dayOriginOf(dayId),
+    });
+    edges.push({
+      src_origin: dayOriginOf(dayId),
+      dst_origin: tripOrigin,
+      relation: "PART_OF",
+    });
+  }
+  // NEXT_DAY chain so the itinerary reads as a line, not a hub-and-spoke.
+  for (let i = 0; i < orderedDays.length - 1; i++) {
+    edges.push({
+      src_origin: dayOriginOf(orderedDays[i]),
+      dst_origin: dayOriginOf(orderedDays[i + 1]),
+      relation: "NEXT_DAY",
+      weight: 0.7,
     });
   }
 

@@ -30,7 +30,35 @@ const KIND_COLOR: Record<string, string> = {
   preference: "#06b6d4",
   tension: "#ec4899",
   topic: "#facc15",
+  day: "#a78bfa",
 };
+
+// Force-layout link strengths per edge kind. Hub spokes stay weak (the
+// auto-normalized default from d3-force would be 1/degree — we override to
+// avoid hub drift); sibling semantic edges pull harder so NEAR / SAME_DAY
+// clusters tighten. Numbers come from the eval agent synthesis + d3 docs.
+const RELATION_STRENGTH: Record<string, number> = {
+  PART_OF: 0.3,
+  ABOUT: 0.25,
+  SCHEDULED_ON: 0.5,
+  NEXT_DAY: 0.7,
+  NEAR: 0.55,
+  SAME_DAY: 0.45,
+  SAME_TIME_OF_DAY: 0.25,
+  PROPOSED: 0.3,
+  CONSTRAINED_BY: 0.3,
+  DECIDED: 0.3,
+  ASKING: 0.3,
+  SUPPORTS: 0.25,
+  TENSION_BETWEEN: 0.3,
+};
+
+// Topic hubs sit on a fixed ring around the origin — gives the layout a
+// stable skeleton. Radius chosen so 10 topics + day spine fit comfortably.
+const TOPIC_RING_RADIUS = 260;
+// Day nodes sit on a second, tighter ring so the itinerary spine doesn't
+// get lost inside the topic ring.
+const DAY_RING_RADIUS = 140;
 
 const LAYER_SPACING = 80; // distance between day layers on the z-axis
 const GLOW_MS = 1800; // how long a node stays "hot" after activation
@@ -42,8 +70,11 @@ interface GraphNode {
   importance: number;
   dayIndex: number;
   color: string;
-  fz: number; // pinned z — makes this node sit in its day's layer
+  fx?: number;
+  fy?: number;
+  fz?: number;
   val: number;
+  degree: number;
 }
 
 interface GraphLink {
@@ -52,6 +83,7 @@ interface GraphLink {
   target: string;
   relation: string;
   color: string;
+  strength: number;
 }
 
 function dayIndexOf(createdAt: string, tripStart: Date): number {
@@ -104,12 +136,26 @@ export function TripBrainGraph({ trip }: { trip: Trip }) {
     return new Date(trip.created_at);
   }, [trip.start_date, trip.created_at]);
 
-  // Build a map of node_id -> latest activation time for glow.
-  const [now, setNow] = useState(() => Date.now());
+  // Activation glow state uses a ref for the ticking `now` value so the 4Hz
+  // interval never triggers a re-render of the ForceGraph subtree. Without
+  // this decoupling, react-force-graph-3d sees a fresh graphData object
+  // reference every 250ms and reheats the simulation → graph never settles.
+  // See Eval 6 / vasturiano/react-force-graph#reheat-on-prop-change.
+  const nowRef = useRef<number>(Date.now());
+  // Prefix `_` to silence unused warning while retaining the re-render
+  // trigger. The value is only read via nowRef in nodeThreeObject.
+  const [, setGlowTick] = useState(0);
   useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 250);
+    const id = setInterval(() => {
+      nowRef.current = Date.now();
+      // Bump a tiny state only to rerender the THREE object inline render;
+      // we immediately gate ForceGraph3D's reheat via a stable graphData ref
+      // below, so this rerender doesn't restart the sim.
+      setGlowTick((t) => (t + 1) % 1_000_000);
+    }, 250);
     return () => clearInterval(id);
   }, []);
+
   const latestActivationByNode = useMemo(() => {
     const map = new Map<string, number>();
     for (const a of activations) {
@@ -123,22 +169,72 @@ export function TripBrainGraph({ trip }: { trip: Trip }) {
 
   const { graphNodes, graphLinks, dayRange } = useMemo(() => {
     const byId = new Map(nodes.map((n) => [n.id, n]));
+
+    // Degree count — drives node sizing and the focus+context neighbor set.
+    const degree = new Map<string, number>();
+    for (const e of edges) {
+      if (!byId.has(e.src_id) || !byId.has(e.dst_id)) continue;
+      degree.set(e.src_id, (degree.get(e.src_id) ?? 0) + 1);
+      degree.set(e.dst_id, (degree.get(e.dst_id) ?? 0) + 1);
+    }
+
+    // Sort topics + days deterministically so ring positions are stable
+    // across rebuilds.
+    const topicIds = nodes
+      .filter((n) => n.kind === "topic")
+      .map((n) => n.id)
+      .sort();
+    const dayIds = nodes
+      .filter((n) => n.kind === "day")
+      .map((n) => n.id)
+      .sort();
+
     let minDay = Infinity;
     let maxDay = -Infinity;
     const gn: GraphNode[] = nodes.map((n: KGNode) => {
       const di = dayIndexOf(n.created_at, tripStart);
       if (di < minDay) minDay = di;
       if (di > maxDay) maxDay = di;
-      return {
+      const deg = degree.get(n.id) ?? 0;
+      const base: GraphNode = {
         id: n.id,
         label: n.label,
         kind: n.kind,
         importance: n.importance,
         dayIndex: di,
         color: KIND_COLOR[n.kind] ?? "#94a3b8",
-        fz: di * LAYER_SPACING,
-        val: 2 + n.importance * 6,
+        // val combines importance + log(degree) so hubs read as hubs
+        // without an explicit kind branch.
+        val: 2 + n.importance * 5 + Math.log2(1 + deg) * 1.6,
+        degree: deg,
       };
+
+      // Pin the trip root at origin, topics on an outer ring, days on an
+      // inner ring. Everything else floats freely. The z-axis is still
+      // used for the "day layers" on free nodes but we zero it on the
+      // pinned hubs so the ring skeleton is planar.
+      if (n.kind === "trip") {
+        base.fx = 0;
+        base.fy = 0;
+        base.fz = 0;
+      } else if (n.kind === "topic") {
+        const idx = topicIds.indexOf(n.id);
+        const total = Math.max(topicIds.length, 1);
+        const angle = (idx / total) * Math.PI * 2;
+        base.fx = Math.cos(angle) * TOPIC_RING_RADIUS;
+        base.fy = Math.sin(angle) * TOPIC_RING_RADIUS;
+        base.fz = 0;
+      } else if (n.kind === "day") {
+        const idx = dayIds.indexOf(n.id);
+        const total = Math.max(dayIds.length, 1);
+        const angle = (idx / total) * Math.PI * 2 + Math.PI / total;
+        base.fx = Math.cos(angle) * DAY_RING_RADIUS;
+        base.fy = Math.sin(angle) * DAY_RING_RADIUS;
+        base.fz = 0;
+      } else {
+        base.fz = di * LAYER_SPACING;
+      }
+      return base;
     });
     const gl: GraphLink[] = [];
     for (const e of edges) {
@@ -149,6 +245,9 @@ export function TripBrainGraph({ trip }: { trip: Trip }) {
         target: e.dst_id,
         relation: e.relation as string,
         color: "rgba(148,163,184,0.35)",
+        strength:
+          RELATION_STRENGTH[e.relation as string] ??
+          (typeof e.weight === "number" ? e.weight : 0.3),
       });
     }
     return {
@@ -160,6 +259,32 @@ export function TripBrainGraph({ trip }: { trip: Trip }) {
           : { min: 0, max: 0 },
     };
   }, [nodes, edges, tripStart]);
+
+  // Neighbor set for focus+context. Memoized against selection + edges so
+  // clicking a node dims the rest of the graph without reheating forces.
+  const neighborSet = useMemo(() => {
+    if (!selectedNodeId) return null;
+    const oneHop = new Set<string>([selectedNodeId]);
+    const twoHop = new Set<string>([selectedNodeId]);
+    for (const e of edges) {
+      if (e.src_id === selectedNodeId) oneHop.add(e.dst_id);
+      if (e.dst_id === selectedNodeId) oneHop.add(e.src_id);
+    }
+    for (const e of edges) {
+      if (oneHop.has(e.src_id)) twoHop.add(e.dst_id);
+      if (oneHop.has(e.dst_id)) twoHop.add(e.src_id);
+    }
+    return { oneHop, twoHop };
+  }, [selectedNodeId, edges]);
+
+  // Stable graphData object — key on node/edge identity, NOT on glowTick.
+  // This is the fix for the reheat-forever bug: feeding a fresh
+  // {nodes,links} object literal on every render reset d3-force's alpha to
+  // 1 each time setGlowTick fired.
+  const graphData = useMemo(
+    () => ({ nodes: graphNodes, links: graphLinks }),
+    [graphNodes, graphLinks]
+  );
 
   const handleRebuild = async () => {
     setBusy(true);
@@ -249,18 +374,19 @@ export function TripBrainGraph({ trip }: { trip: Trip }) {
             ref={fgRef as never}
             width={size.w}
             height={size.h}
-            graphData={{ nodes: graphNodes, links: graphLinks }}
+            graphData={graphData}
             backgroundColor="rgba(0,0,0,0)"
             onNodeClick={(n: GraphNode) => setSelectedNodeId(n.id)}
             onBackgroundClick={() => setSelectedNodeId(null)}
             nodeLabel={(n: GraphNode) =>
               `<div style="background:#0f172a;color:white;padding:4px 8px;border-radius:6px;font-size:11px;">
                  <div style="font-weight:600">${escapeHtml(n.label)}</div>
-                 <div style="opacity:0.6;margin-top:2px;text-transform:capitalize">${n.kind} · day ${n.dayIndex}</div>
+                 <div style="opacity:0.6;margin-top:2px;text-transform:capitalize">${n.kind} · degree ${n.degree}</div>
                </div>`
             }
             linkLabel={(l: GraphLink) => l.relation}
             nodeThreeObject={(n: GraphNode) => {
+              const now = nowRef.current;
               const lastHit = latestActivationByNode.get(n.id);
               const since = lastHit ? now - lastHit : Infinity;
               const isHot = since < GLOW_MS;
@@ -270,10 +396,23 @@ export function TripBrainGraph({ trip }: { trip: Trip }) {
                 : 1;
               const radius = n.val * pulse;
               const group = new THREE.Group();
+
+              // Focus+context: if a node is selected, dim anything outside
+              // the 2-hop neighborhood so the relevant sub-graph pops.
+              const inFocus =
+                !neighborSet || neighborSet.twoHop.has(n.id);
+              const isDirect =
+                !neighborSet || neighborSet.oneHop.has(n.id);
+              const baseOpacity = !inFocus
+                ? 0.08
+                : isDirect || isHot
+                  ? 1
+                  : 0.5;
+
               const mat = new THREE.MeshBasicMaterial({
                 color: new THREE.Color(n.color),
                 transparent: true,
-                opacity: isHot ? 1 : 0.9,
+                opacity: baseOpacity,
               });
               const sphere = new THREE.Mesh(
                 new THREE.SphereGeometry(radius, 16, 16),
@@ -317,30 +456,67 @@ export function TripBrainGraph({ trip }: { trip: Trip }) {
             linkDirectionalParticleSpeed={0.006}
             linkColor={(l: GraphLink) => {
               const src = l.source as unknown as GraphNode | string;
+              const dst = l.target as unknown as GraphNode | string;
               const srcId = typeof src === "string" ? src : src.id;
+              const dstId = typeof dst === "string" ? dst : dst.id;
               const hot = latestActivationByNode.has(srcId);
-              return hot ? "rgba(251,191,36,0.85)" : "rgba(148,163,184,0.35)";
+              if (hot) return "rgba(251,191,36,0.85)";
+
+              // Focus+context: fade edges that don't touch the selected
+              // node's 2-hop neighborhood.
+              if (neighborSet) {
+                const touches =
+                  neighborSet.twoHop.has(srcId) ||
+                  neighborSet.twoHop.has(dstId);
+                if (!touches) return "rgba(148,163,184,0.04)";
+              }
+
+              // Sibling semantic edges (NEAR / SAME_DAY) pop brighter so
+              // the graph's web-like structure is visible; hub spokes
+              // (ABOUT / PART_OF) dim into context.
+              if (
+                l.relation === "NEAR" ||
+                l.relation === "SAME_DAY" ||
+                l.relation === "NEXT_DAY"
+              ) {
+                return "rgba(186,230,253,0.55)";
+              }
+              return "rgba(148,163,184,0.18)";
             }}
-            // Tighter cooldown so the sim settles quickly instead of endlessly
-            // drifting. d3VelocityDecay = friction; d3AlphaDecay speeds the
-            // cool-down; d3AlphaMin stops the sim earlier than the default.
-            cooldownTicks={120}
-            warmupTicks={30}
-            d3AlphaDecay={0.06}
-            d3AlphaMin={0.02}
-            d3VelocityDecay={0.55}
+            // Per-link force strength pulled from the edge type map so
+            // semantic edges (NEAR, SAME_DAY) pull harder than hub spokes.
+            linkStrength={(l: GraphLink) => l.strength}
+            // Settle-and-stop recipe validated in research: heavier
+            // friction, higher alphaMin to kill residual oscillation,
+            // slightly slower alphaDecay so the settle actually reaches
+            // equilibrium before being clamped.
+            cooldownTicks={80}
+            warmupTicks={60}
+            d3AlphaDecay={0.035}
+            d3AlphaMin={0.1}
+            d3VelocityDecay={0.75}
             // When the sim stops, pin every node in place. Dragging a node
-            // still works (react-force-graph repins on drop), but nothing
-            // drifts passively any more.
+            // still works (react-force-graph re-pins on drop), and since
+            // graphData's object identity is now stable (not recreated on
+            // every render) the sim doesn't re-heat on glow-tick renders.
             onEngineStop={() => {
               const fg = fgRef.current as unknown as
-                | { graphData?: () => { nodes: Array<{ x: number; y: number; fx?: number; fy?: number }> } }
+                | {
+                    graphData?: () => {
+                      nodes: Array<{
+                        x: number;
+                        y: number;
+                        fx?: number;
+                        fy?: number;
+                      }>;
+                    };
+                  }
                 | undefined;
               const data = fg?.graphData?.();
               if (!data) return;
               for (const n of data.nodes) {
-                if (typeof n.x === "number") n.fx = n.x;
-                if (typeof n.y === "number") n.fy = n.y;
+                if (n.fx == null && typeof n.x === "number") n.fx = n.x;
+                if (n.fy == null && typeof n.y === "number") n.fy = n.y;
               }
             }}
             showNavInfo={false}
@@ -484,6 +660,7 @@ function Legend() {
   const kinds: { kind: string; label: string }[] = [
     { kind: "trip", label: "Trip" },
     { kind: "topic", label: "Topics" },
+    { kind: "day", label: "Days" },
     { kind: "person", label: "People" },
     { kind: "place", label: "Places" },
     { kind: "decision", label: "Decisions" },

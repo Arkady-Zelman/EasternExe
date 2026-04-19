@@ -7,7 +7,8 @@ export type KGNodeKind =
   | "constraint"
   | "preference"
   | "tension"
-  | "topic";
+  | "topic"
+  | "day";
 
 export type KGRelation =
   | "PART_OF"
@@ -22,7 +23,12 @@ export type KGRelation =
   | "SUPERSEDES"
   | "RESOLVES"
   | "TENSION_BETWEEN"
-  | "SUPPORTS";
+  | "SUPPORTS"
+  | "SCHEDULED_ON"
+  | "NEXT_DAY"
+  | "NEAR"
+  | "SAME_DAY"
+  | "SAME_TIME_OF_DAY";
 
 export type KGConfidence = "provisional" | "confirmed" | "disputed";
 
