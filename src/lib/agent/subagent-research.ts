@@ -3,7 +3,7 @@ import "server-only";
 import type OpenAI from "openai";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { callLlm, getZaiModel } from "@/lib/llm";
+import { callLlm, getZaiFastModel, getZaiModel } from "@/lib/llm";
 import {
   executeTool,
   subagentResearchTools,
@@ -98,11 +98,13 @@ export async function runResearchSubagent(args: {
     ];
 
     let lastStageInserted = "";
+    const subModel = getZaiFastModel();
 
     for (let turn = 0; turn < MAX_TURNS; turn++) {
       const result = await callLlm({
         messages: messages as unknown as Parameters<typeof callLlm>[0]["messages"],
         tools: subagentResearchTools,
+        model: subModel,
       });
 
       const fnCalls = result.toolCalls.filter(
@@ -181,6 +183,7 @@ export async function runResearchSubagent(args: {
     const forcedResult = await callLlm({
       messages: messages as unknown as Parameters<typeof callLlm>[0]["messages"],
       // No tools -- force a text response
+      model: subModel,
     });
     const fallback =
       forcedResult.content.trim() ||

@@ -10,17 +10,28 @@ interface Props {
   trip: Trip;
 }
 
+// Rotate through these on each scan click so users see different flavours
+// of events rather than hitting the same "mix" query every time.
+const BUCKETS = ["mix", "music", "food", "art", "sports"];
+
 export function EventsPanel({ trip }: Props) {
   const [results, setResults] = useState<SpotData[]>([]);
   const [scanning, setScanning] = useState(false);
   const [scanned, setScanned] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [bucketIdx, setBucketIdx] = useState(0);
 
   const handleScan = async () => {
     setScanning(true);
     setError(null);
+    // Advance bucket for this call so the next scan returns a different slice.
+    const bucket = BUCKETS[bucketIdx % BUCKETS.length];
+    setBucketIdx((i) => (i + 1) % BUCKETS.length);
     try {
-      const res = await fetch(`/api/events/scan?trip_id=${trip.id}`);
+      const res = await fetch(
+        `/api/events/scan?trip_id=${trip.id}&bucket=${bucket}`,
+        { cache: "no-store" }
+      );
       if (!res.ok) throw new Error("Scan failed");
       const data = await res.json();
       // Brave event results fall into two buckets: actual venue hits (have

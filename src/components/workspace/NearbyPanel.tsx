@@ -11,10 +11,15 @@ interface Props {
   places: Place[];
 }
 
+// Cycle through these on each manual refresh so the user sees a different
+// slice each time rather than the same Google top-20.
+const BUCKETS = ["food", "sights", "drinks", "nature", "shopping"];
+
 export function NearbyPanel({ trip, places }: Props) {
   const [results, setResults] = useState<SpotData[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [bucketIdx, setBucketIdx] = useState(0);
   const intervalRef = useRef<ReturnType<typeof setInterval>>();
 
   const savedPlaceIds = new Set(
@@ -26,8 +31,12 @@ export function NearbyPanel({ trip, places }: Props) {
       const params = new URLSearchParams({ trip_id: trip.id });
       if (trip.destination_lat != null) params.set("lat", String(trip.destination_lat));
       if (trip.destination_lng != null) params.set("lng", String(trip.destination_lng));
+      // Rotate buckets — the server surfaces a different slice per bucket.
+      params.set("bucket", BUCKETS[bucketIdx % BUCKETS.length]);
 
-      const res = await fetch(`/api/places/nearby?${params}`);
+      const res = await fetch(`/api/places/nearby?${params}`, {
+        cache: "no-store",
+      });
       if (!res.ok) throw new Error("Failed to fetch nearby spots");
       const data = await res.json();
       setResults(
@@ -42,7 +51,7 @@ export function NearbyPanel({ trip, places }: Props) {
     } finally {
       setLoading(false);
     }
-  }, [trip.id, trip.destination_lat, trip.destination_lng]);
+  }, [trip.id, trip.destination_lat, trip.destination_lng, bucketIdx]);
 
   // Initial fetch + 60s polling
   useEffect(() => {
@@ -53,7 +62,8 @@ export function NearbyPanel({ trip, places }: Props) {
 
   const handleRefresh = () => {
     setLoading(true);
-    fetchNearby();
+    // Advance to the next bucket so results change on every click.
+    setBucketIdx((i) => (i + 1) % BUCKETS.length);
   };
 
   if (!trip.destination_lat || !trip.destination_lng) {

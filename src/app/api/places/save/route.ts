@@ -21,7 +21,10 @@ const bodySchema = z.object({
     "nightlife",
     "other",
   ]),
-  notes: z.string().max(500).optional(),
+  // Callers sometimes send `notes: null` (SpotCard uses `cleanSummary || null`).
+  // `.optional()` alone rejects null; `.nullable().optional()` accepts both null
+  // and undefined.
+  notes: z.string().max(500).nullable().optional(),
   source: z.enum(["agent", "nearby", "events", "manual"]).default("manual"),
 });
 

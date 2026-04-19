@@ -96,8 +96,14 @@ export function SpotCard({ spot, tripId, onSave }: Props) {
   const [saved, setSaved] = useState(spot.already_saved ?? false);
   const [imgOk, setImgOk] = useState(true);
 
-  const category: PlaceCategory = (spot.category as PlaceCategory | undefined) ??
-    mapGoogleTypeToCategory((spot as { types?: string[] }).types);
+  // Nearby endpoint returns `category: null` (it only sets `types`). `??` only
+  // catches undefined, so the null was falling through and hitting the save
+  // endpoint's Zod validator as a rejected value. `||` handles both null and
+  // undefined cleanly — an empty string would also fall through to the
+  // types-based mapper which is the desired behavior.
+  const category: PlaceCategory =
+    ((spot.category as PlaceCategory | null | undefined) ||
+      mapGoogleTypeToCategory((spot as { types?: string[] }).types)) as PlaceCategory;
   const categoryColor = CATEGORY_COLORS[category] ?? "#94a3b8";
   const categoryLabel = CATEGORY_LABELS[category] ?? "Place";
   const CategoryIcon = CATEGORY_ICONS[category] ?? Calendar;

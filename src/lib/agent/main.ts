@@ -2,7 +2,7 @@ import "server-only";
 
 import type OpenAI from "openai";
 
-import { callLlm, getZaiModel } from "@/lib/llm";
+import { callLlm, getZaiFastModel, getZaiModel } from "@/lib/llm";
 import { concatChunks } from "@/lib/embeddings";
 import {
   executeTool,
@@ -421,11 +421,16 @@ export async function runAgent(args: RunAgentArgs): Promise<void> {
       },
     };
 
-    // Tool loop
+    // Tool loop — use the fast model so the whole run (up to 3 tool turns)
+    // fits inside Vercel's 60s serverless cap. ZAI_MODEL stays for ingestion
+    // and other non-interactive paths where higher quality matters more than
+    // latency.
+    const agentModel = getZaiFastModel();
     for (let turn = 0; turn < MAX_TURNS; turn++) {
       const result = await callLlm({
         messages: messages as unknown as Parameters<typeof callLlm>[0]["messages"],
         tools: mainAgentTools,
+        model: agentModel,
       });
 
       if (result.toolCalls.length === 0) {

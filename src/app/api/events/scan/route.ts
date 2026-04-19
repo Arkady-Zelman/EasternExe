@@ -34,17 +34,22 @@ export async function GET(req: Request) {
   const lat = trip.destination_lat;
   const lng = trip.destination_lng;
 
+  // Optional `bucket` param picks a query template set. Rotating it client
+  // side gives users a different slice per refresh.
+  const bucket = url.searchParams.get("bucket") ?? "mix";
+
   // Run Overpass + web search in parallel
   const [venueResults, webResults] = await Promise.all([
     lat && lng ? queryOverpassEventVenues(lat, lng, 5000) : Promise.resolve([]),
-    searchWebEvents(trip.destination),
+    searchWebEvents(trip.destination, bucket),
   ]);
 
   // Merge: venues first (they have coordinates), then web results
   const merged: EventResult[] = [...venueResults, ...webResults];
 
   return NextResponse.json(
-    { results: merged },
-    { headers: { "cache-control": "public, max-age=300" } }
+    { results: merged, bucket },
+    // No caching — each refresh must re-run with the new bucket.
+    { headers: { "cache-control": "no-store" } }
   );
 }

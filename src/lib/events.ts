@@ -90,8 +90,19 @@ export async function queryOverpassEventVenues(
   }
 }
 
+// Rotating query templates so refresh produces a different slice of events.
+// Bucket names mirror Nearby so the UX is consistent.
+const EVENT_QUERY_BUCKETS: Record<string, (dest: string, when: string) => string[]> = {
+  mix: (d, w) => [`${d} events ${w}`, `${d} pop-up ${w}`, `${d} festival ${w}`],
+  music: (d, w) => [`${d} concert ${w}`, `${d} gig ${w}`, `${d} live music ${w}`],
+  food: (d, w) => [`${d} food festival ${w}`, `${d} pop-up restaurant ${w}`, `${d} supper club ${w}`],
+  art: (d, w) => [`${d} exhibition ${w}`, `${d} gallery opening ${w}`, `${d} immersive ${w}`],
+  sports: (d, w) => [`${d} sports event ${w}`, `${d} match ${w}`, `${d} race ${w}`],
+};
+
 export async function searchWebEvents(
-  destination: string
+  destination: string,
+  bucket: string = "mix"
 ): Promise<EventResult[]> {
   const now = new Date();
   const monthYear = now.toLocaleDateString("en-US", {
@@ -99,11 +110,8 @@ export async function searchWebEvents(
     year: "numeric",
   });
 
-  const queries = [
-    `${destination} events ${monthYear}`,
-    `${destination} pop-up ${monthYear}`,
-    `${destination} festival ${monthYear}`,
-  ];
+  const template = EVENT_QUERY_BUCKETS[bucket] ?? EVENT_QUERY_BUCKETS.mix;
+  const queries = template(destination, monthYear);
 
   const allResults: EventResult[] = [];
 

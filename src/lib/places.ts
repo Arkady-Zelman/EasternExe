@@ -117,7 +117,8 @@ const NEARBY_TYPES = [
 export async function googlePlacesNearbySearch(
   lat: number,
   lng: number,
-  radius = 1500
+  radius = 1500,
+  includedTypes: string[] = NEARBY_TYPES
 ): Promise<NearbySearchResult[]> {
   const apiKey = process.env.GOOGLE_PLACES_API_KEY;
   if (!apiKey) return [];
@@ -140,7 +141,7 @@ export async function googlePlacesNearbySearch(
               radius,
             },
           },
-          includedTypes: NEARBY_TYPES,
+          includedTypes,
           languageCode: "en",
           maxResultCount: 20,
         }),

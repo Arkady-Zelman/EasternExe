@@ -31,6 +31,15 @@ export function getZaiModel(): string {
   return model;
 }
 
+/**
+ * Faster model for interactive turns (agent, subagent) so we stay inside
+ * Vercel's 60s serverless cap. Falls back to ZAI_MODEL if unset so no-op
+ * deployments work. Point ZAI_MODEL_FAST at e.g. `glm-4.5-air` on Vercel.
+ */
+export function getZaiFastModel(): string {
+  return process.env.ZAI_MODEL_FAST ?? getZaiModel();
+}
+
 export interface LlmMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string;
