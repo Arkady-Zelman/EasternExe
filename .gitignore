@@ -42,5 +42,6 @@ next-env.d.ts
 /setup-placeholder-desktop.png
 /run-*.png
 
-# session notes
-SESSION_*.md
+# session logs (local only; keep under /sessions/)
+/sessions/*
+!/sessions/README.md
