@@ -374,14 +374,12 @@ async function researchActivityTool(
   if (!ctx.spawnResearchSubagent) {
     return "Research agent unavailable.";
   }
-  // Insert a friendly status message visible in chat before the subagent starts
-  await ctx.supabase.from("chat_messages").insert({
-    room_id: ctx.roomId,
-    sender_type: "agent",
-    sender_label: "Agent",
-    content: "Let me research that for you...",
-    thinking_state: "streaming",
-  });
+  // Previously we inserted a "Let me research that for you..." chat row
+  // here, but that created a redundant bubble alongside the main agent's
+  // existing placeholder AND the subagent's own placeholder — three
+  // overlapping status bubbles per turn. The subagent inserts its own
+  // placeholder in runResearchSubagent; the sidebar AgentActivityPanel
+  // shows live tool status. No need for an extra row.
   return ctx.spawnResearchSubagent({
     description: args.description,
     requesterContext: args.requester_context,

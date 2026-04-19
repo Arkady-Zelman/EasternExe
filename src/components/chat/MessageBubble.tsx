@@ -97,14 +97,16 @@ export function MessageBubble({
   const isSystem = message.sender_type === "system";
   const shared = !!message.shared_from_room_id;
 
-  // If a placeholder row has been "thinking/streaming" longer than 90s the
-  // Vercel serverless that was writing it almost certainly hit the 60s cap
-  // and was killed — so the row will never transition. Treat it as failed
-  // on the client (no DB write) instead of showing forever-working state.
+  // If a placeholder row has been "thinking/streaming" much longer than a
+  // legitimate agent turn, the Vercel serverless that was writing it
+  // probably hit the 60s cap and was killed — so the row will never
+  // transition. Treat it as failed on the client. The window has to be
+  // generous enough that live tool calls (Google Places, Brave Search)
+  // aren't flagged — 180s leaves headroom for multi-turn subagent runs.
   const effectiveState =
     (message.thinking_state === "thinking" ||
       message.thinking_state === "streaming") &&
-    Date.now() - new Date(message.created_at).getTime() > 90_000
+    Date.now() - new Date(message.created_at).getTime() > 180_000
       ? "failed"
       : message.thinking_state;
 

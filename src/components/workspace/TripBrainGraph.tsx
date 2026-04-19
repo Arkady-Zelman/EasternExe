@@ -390,7 +390,7 @@ export function TripBrainGraph({ trip }: { trip: Trip }) {
 
       <div
         ref={containerRef}
-        className="relative min-h-0 flex-1 overflow-hidden bg-[radial-gradient(ellipse_at_center,_#0b1020_0%,_#000_100%)]"
+        className="relative min-h-0 flex-1 overflow-hidden bg-[radial-gradient(ellipse_at_center,_#ffffff_0%,_#f1f5f9_100%)] dark:bg-[radial-gradient(ellipse_at_center,_#0b1020_0%,_#000_100%)]"
       >
         {loading ? (
           <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
@@ -496,28 +496,28 @@ export function TripBrainGraph({ trip }: { trip: Trip }) {
               const srcId = typeof src === "string" ? src : src.id;
               const dstId = typeof dst === "string" ? dst : dst.id;
               const hot = latestActivationByNode.has(srcId);
-              if (hot) return "rgba(251,191,36,0.85)";
+              if (hot) return "rgba(234,88,12,0.9)";
 
-              // Focus+context: fade edges that don't touch the selected
-              // node's 2-hop neighborhood.
+              // Focus+context dim (faint but still visible on white bg).
               if (neighborSet) {
                 const touches =
                   neighborSet.twoHop.has(srcId) ||
                   neighborSet.twoHop.has(dstId);
-                if (!touches) return "rgba(148,163,184,0.04)";
+                if (!touches) return "rgba(100,116,139,0.1)";
               }
 
               // Sibling semantic edges (NEAR / SAME_DAY) pop brighter so
               // the graph's web-like structure is visible; hub spokes
-              // (ABOUT / PART_OF) dim into context.
+              // (ABOUT / PART_OF) dim into context. Slate tones read well
+              // on both light and dark backgrounds.
               if (
                 l.relation === "NEAR" ||
                 l.relation === "SAME_DAY" ||
                 l.relation === "NEXT_DAY"
               ) {
-                return "rgba(186,230,253,0.55)";
+                return "rgba(14,165,233,0.55)";
               }
-              return "rgba(148,163,184,0.18)";
+              return "rgba(71,85,105,0.35)";
             }}
             // Per-link force strength pulled from the edge type map so
             // semantic edges (NEAR, SAME_DAY) pull harder than hub spokes.

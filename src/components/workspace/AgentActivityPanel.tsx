@@ -32,9 +32,9 @@ const TOOL_LABELS: Record<string, string> = {
 // Vercel Hobby caps serverless at 60s. When runAgent blows the budget the
 // process is killed mid-stream, the try/catch never fires, and the placeholder
 // row stays in `streaming` forever — which is why "Agent working…" was visible
-// on a room where nothing had been prompted. We treat any row older than this
-// as dead on the client, regardless of DB state.
-const STALE_MS = 90_000;
+// on a room where nothing had been prompted. 180s leaves enough headroom for a
+// genuine multi-turn subagent run while still catching killed sessions.
+const STALE_MS = 180_000;
 
 export function AgentActivityPanel({ messages }: Props) {
   // Find latest agent message that's thinking/streaming AND recent.

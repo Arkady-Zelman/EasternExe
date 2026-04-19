@@ -32,8 +32,11 @@ import type {
   TripMemory,
 } from "@/types/db";
 
-const HISTORY_LIMIT = 20;
-const MAX_TURNS = 5;
+// Tuned for the Vercel Hobby 60s cap. 12 history rows give enough context
+// for "what was decided today" without bloating prompt size; 3 tool turns
+// let the agent search → save → answer without getting stuck looping.
+const HISTORY_LIMIT = 12;
+const MAX_TURNS = 3;
 
 function getTimeOfDay(): string {
   const hour = new Date().getHours();
@@ -446,13 +449,13 @@ export async function runAgent(args: RunAgentArgs): Promise<void> {
           tc.type === "function"
       );
 
-      // Progressive update: show which tools the agent is calling
-      const toolNames = fnCalls.map((tc) => tc.function.name).join(", ");
-      const progress = result.content.trim()
-        ? `${result.content.trim()}\n\n_Calling ${toolNames}…_`
-        : `_Calling ${toolNames}…_`;
+      // Update tool-call metadata so the sidebar AgentActivityPanel can show
+      // progress, but keep the chat bubble content stable — dumping italic
+      // "_Calling xyz_" markers into the bubble clutters the transcript and
+      // creates a separate ugly message per turn. The sidebar is the right
+      // surface for live status.
       await updatePlaceholder({
-        content: progress,
+        content: result.content.trim() || "",
         thinking_state: "streaming",
         tool_calls: fnCalls.map((tc) => ({
           id: tc.id,
@@ -466,12 +469,22 @@ export async function runAgent(args: RunAgentArgs): Promise<void> {
         tool_calls: fnCalls,
       });
 
-      for (const tc of fnCalls) {
-        const toolResult = await executeTool(
-          tc.function.name,
-          tc.function.arguments,
-          toolCtx
-        );
+      // Execute all tool calls in parallel — most of the latency inside a
+      // turn is the tool waiting on external APIs (Google Places, Brave).
+      // Previously we awaited them serially, so a turn with 2 searches
+      // took 2× the round-trip. Promise.all cuts that in half.
+      const toolExecutions = await Promise.all(
+        fnCalls.map(async (tc) => ({
+          tc,
+          result: await executeTool(
+            tc.function.name,
+            tc.function.arguments,
+            toolCtx
+          ),
+        }))
+      );
+
+      for (const { tc, result: toolResult } of toolExecutions) {
         messages.push({
           role: "tool",
           content: toolResult,

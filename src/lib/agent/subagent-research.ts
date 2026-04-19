@@ -15,7 +15,9 @@ import {
 } from "@/lib/prompts/subagent-research";
 import type { TripMemory } from "@/types/db";
 
-const MAX_TURNS = 3;
+// Two turns is enough for search → answer. A 3rd turn burns ~10s of latency
+// and the 60s Vercel cap kills the parent agent before it can finalize.
+const MAX_TURNS = 2;
 
 const STAGE_MESSAGES: Record<string, string> = {
   search_places: "Checking out the best spots nearby...",
@@ -42,16 +44,6 @@ export async function runResearchSubagent(args: {
   currentTimeOfDay: string;
 }): Promise<string> {
   const t0 = Date.now();
-
-  // Insert status messages without awaiting to reduce latency
-  const insertStatus = (content: string) =>
-    args.supabase.from("chat_messages").insert({
-      room_id: args.roomId,
-      sender_type: "subagent",
-      sender_label: "Research Agent",
-      content,
-      thinking_state: "streaming",
-    });
 
   // Insert the subagent placeholder -- this is the message we'll update with the final answer
   const { data: placeholder, error: placeholderErr } = await args.supabase
@@ -141,15 +133,18 @@ export async function runResearchSubagent(args: {
         return "";
       }
 
-      // Fire-and-forget stage message + placeholder update (non-blocking)
+      // Previously we ALSO inserted a fresh "Checking out the best spots
+      // nearby..." status row per tool call (insertStatus) + rewrote the
+      // placeholder to "Investigating... (search_places)". That chained
+      // 3-4 stacked ugly bubbles in the transcript. Drop both — keep a
+      // single placeholder updating content, and let the sidebar activity
+      // panel show live tool state.
       const stageMsg = friendlyStage(fnCalls.map((tc) => tc.function.name));
       if (stageMsg !== lastStageInserted) {
-        insertStatus(stageMsg); // don't await
         lastStageInserted = stageMsg;
       }
-      const toolNames = fnCalls.map((tc) => tc.function.name).join(", ");
       updateSubagent({
-        content: `Investigating... (${toolNames})`,
+        content: stageMsg,
         thinking_state: "streaming",
       }); // don't await
 
@@ -176,8 +171,13 @@ export async function runResearchSubagent(args: {
       }
     }
 
-    // Exhausted turn budget -- force a final response without tools
-    insertStatus("Putting it all together..."); // don't await
+    // Exhausted turn budget -- force a final response without tools. No
+    // more status-bubble inserts here either; the placeholder's own
+    // content carries the live state and the sidebar shows tool activity.
+    updateSubagent({
+      content: "Putting it all together...",
+      thinking_state: "streaming",
+    }); // don't await
     const forcedResult = await callLlm({
       messages: messages as unknown as Parameters<typeof callLlm>[0]["messages"],
       // No tools -- force a text response
