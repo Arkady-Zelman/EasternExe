@@ -15,15 +15,16 @@ import {
 
 import { useTripBrain } from "@/hooks/useTripBrain";
 import { PlacesPanel } from "@/components/workspace/PlacesPanel";
+import { TripBrainGraph } from "@/components/workspace/TripBrainGraph";
 import { cn } from "@/lib/utils";
-import type { Place } from "@/types/db";
+import type { Place, Trip } from "@/types/db";
 
 interface Props {
-  tripId: string;
+  trip: Trip;
   places: Place[];
 }
 
-type BrainTab = "plan" | "places" | "todo" | "logistics";
+type BrainTab = "graph" | "plan" | "places" | "todo" | "logistics";
 
 const TABS: {
   id: BrainTab;
@@ -31,6 +32,7 @@ const TABS: {
   icon: React.ComponentType<{ className?: string }>;
   accent: string;
 }[] = [
+  { id: "graph", label: "Brain", icon: Brain, accent: "#8b5cf6" },
   { id: "plan", label: "Plan", icon: Sparkles, accent: "#22c55e" },
   { id: "places", label: "Places", icon: MapPin, accent: "#0ea5e9" },
   { id: "todo", label: "To-do", icon: ListTodo, accent: "#f59e0b" },
@@ -55,9 +57,9 @@ function categorizeDecision(text: string): {
   return { kind: "other", icon: Trophy };
 }
 
-export function TripBrainPanel({ tripId, places }: Props) {
-  const brain = useTripBrain(tripId);
-  const [tab, setTab] = useState<BrainTab>("plan");
+export function TripBrainPanel({ trip, places }: Props) {
+  const brain = useTripBrain(trip.id);
+  const [tab, setTab] = useState<BrainTab>("graph");
   const [doneIds, setDoneIds] = useState<Set<number>>(new Set());
 
   const priorities = brain?.memory?.priorities ?? [];
@@ -69,7 +71,8 @@ export function TripBrainPanel({ tripId, places }: Props) {
     (d) => categorizeDecision(d).kind === "travel"
   );
 
-  const counts = {
+  const counts: Record<BrainTab, number> = {
+    graph: 0,
     plan: priorities.length + decisions.filter((d) => categorizeDecision(d).kind === "other").length,
     places: brain?.placesTotal ?? places.length,
     todo: openQuestions.length,
@@ -118,8 +121,15 @@ export function TripBrainPanel({ tripId, places }: Props) {
         })}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto p-4">
-        {tab === "plan" ? (
+      <div
+        className={cn(
+          "min-h-0 flex-1",
+          tab === "graph" ? "overflow-hidden" : "overflow-y-auto p-4"
+        )}
+      >
+        {tab === "graph" ? (
+          <TripBrainGraph trip={trip} />
+        ) : tab === "plan" ? (
           <PlanTab priorities={priorities} decisions={decisions} />
         ) : tab === "places" ? (
           <PlacesPanel places={places} />

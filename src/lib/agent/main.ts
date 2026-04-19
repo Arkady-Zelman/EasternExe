@@ -18,6 +18,9 @@ import {
   agentPrivateContext,
   agentPrivateSystem,
 } from "@/lib/prompts/agent-private";
+import { computeGraphInMemory } from "@/lib/graph/build";
+import { serializeGraph } from "@/lib/graph/serialize";
+import type { KGEdge, KGNode } from "@/lib/graph/types";
 import { getSupabaseServerClient } from "@/lib/supabase/server";
 import type {
   ChatMessage,
@@ -30,6 +33,8 @@ import type {
 
 const HISTORY_LIMIT = 20;
 const MAX_TURNS = 5;
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 function getTimeOfDay(): string {
   const hour = new Date().getHours();
@@ -59,6 +64,80 @@ export async function runAgent(args: RunAgentArgs): Promise<void> {
       .from("chat_messages")
       .update(patch)
       .eq("id", args.placeholderMessageId);
+  };
+
+  // Create the ai_runs row up front so we have a run_id to stamp on
+  // agent_run_activations as the agent touches graph nodes. We'll fill in
+  // the final output/duration at the terminal update below.
+  const { data: runRow } = await supabase
+    .from("ai_runs")
+    .insert({
+      trip_id: args.tripId,
+      kind: "agent.run",
+      input: { trigger_message_id: args.triggerMessageId },
+      model: getZaiModel(),
+    })
+    .select("id")
+    .single();
+  const runId = (runRow?.id ?? null) as string | null;
+
+  const finalizeRun = async (patch: {
+    kind?: string;
+    output?: unknown;
+    error?: string | null;
+  }) => {
+    if (!runId) return;
+    await supabase
+      .from("ai_runs")
+      .update({
+        ...patch,
+        duration_ms: Date.now() - t0,
+      })
+      .eq("id", runId);
+  };
+
+  // Activations are ephemeral UI events — ship them via Supabase Realtime
+  // broadcast (no table required, no migration dependency). The client's
+  // useActivations hook subscribes to the same channel and lights up the
+  // matching nodes for ~1.8s.
+  const activationChannel = supabase.channel(`graph-activations:${args.tripId}`, {
+    config: { broadcast: { self: false } },
+  });
+  let channelReady: Promise<void> | null = null;
+  const ensureChannel = (): Promise<void> => {
+    if (!channelReady) {
+      channelReady = new Promise((resolve) => {
+        activationChannel.subscribe((status) => {
+          if (status === "SUBSCRIBED") resolve();
+        });
+        // Hard cap so a flaky channel doesn't block the agent
+        setTimeout(resolve, 1500);
+      });
+    }
+    return channelReady;
+  };
+
+  const broadcastActivations = async (
+    nodeIds: string[],
+    reason: string
+  ): Promise<void> => {
+    if (!runId || nodeIds.length === 0) return;
+    try {
+      await ensureChannel();
+      await activationChannel.send({
+        type: "broadcast",
+        event: "activate",
+        payload: {
+          trip_id: args.tripId,
+          run_id: runId,
+          node_ids: nodeIds,
+          reason,
+          at: new Date().toISOString(),
+        },
+      });
+    } catch (e) {
+      console.warn("broadcast failed (non-fatal):", e);
+    }
   };
 
   try {
@@ -135,6 +214,45 @@ export async function runAgent(args: RunAgentArgs): Promise<void> {
       ragChunks = concatChunks(chunks, 5000);
     }
 
+    // Knowledge graph — compute on the fly from source tables (no
+    // kg_nodes/kg_edges tables needed). Serialize into the prompt so the
+    // agent sees the compiled trip brain, and broadcast the node IDs it
+    // consumed so the viz lights them up in real time.
+    const { nodes: kgNodes, edges: kgEdges } = await computeGraphInMemory(
+      supabase,
+      args.tripId
+    );
+    const graphDigest =
+      kgNodes.length > 0
+        ? serializeGraph(
+            kgNodes as unknown as KGNode[],
+            kgEdges as unknown as KGEdge[],
+            { maxPerKind: 25 }
+          )
+        : "";
+    if (kgNodes.length > 0) {
+      // Phased waves so the viz cascades visibly as the agent reads the brain.
+      // 1) Trip hub + participants, 2) constraints + preferences, 3) decisions
+      //    + questions + tensions, 4) places. ~120ms between waves.
+      const orderGroups = [
+        new Set(["trip", "person"]),
+        new Set(["constraint", "preference"]),
+        new Set(["decision", "question", "tension"]),
+        new Set(["place"]),
+      ];
+      for (let i = 0; i < orderGroups.length; i++) {
+        const wave = kgNodes
+          .filter((n) => orderGroups[i].has(n.kind))
+          .map((n) => n.id);
+        if (wave.length === 0) continue;
+        await broadcastActivations(
+          wave,
+          `Wave ${i + 1} · ${Array.from(orderGroups[i]).join("/")}`
+        );
+        if (i < orderGroups.length - 1) await sleep(120);
+      }
+    }
+
     // Decide mode and build system prompt
     const mode: "group" | "private" = room.type === "group" ? "group" : "private";
 
@@ -155,14 +273,21 @@ export async function runAgent(args: RunAgentArgs): Promise<void> {
     let systemPrompt: string;
     let contextBlock: string;
 
+    const prependGraph = (block: string) =>
+      graphDigest
+        ? `TRIP KNOWLEDGE GRAPH (compiled brain — prefer this over raw RAG):\n${graphDigest}\n\n---\n\n${block}`
+        : block;
+
     if (mode === "group") {
       systemPrompt = agentGroupSystem;
-      contextBlock = agentGroupContext({
-        tripMemoryJson: JSON.stringify(tripMemory ?? {}, null, 2),
-        participantsJson: JSON.stringify(profilesForPrompt, null, 2),
-        recentMessages: historyForPrompt,
-        ragChunks,
-      });
+      contextBlock = prependGraph(
+        agentGroupContext({
+          tripMemoryJson: JSON.stringify(tripMemory ?? {}, null, 2),
+          participantsJson: JSON.stringify(profilesForPrompt, null, 2),
+          recentMessages: historyForPrompt,
+          ragChunks,
+        })
+      );
     } else {
       const ownerId = room.owner_id!;
       const ownerName = nameById[ownerId] ?? "participant";
@@ -202,20 +327,22 @@ export async function runAgent(args: RunAgentArgs): Promise<void> {
       }
 
       systemPrompt = agentPrivateSystem;
-      contextBlock = agentPrivateContext({
-        participantName: ownerName,
-        profileJson: JSON.stringify(
-          ownerProfile
-            ? { display_name: ownerName, ...ownerProfile }
-            : { display_name: ownerName },
-          null,
-          2
-        ),
-        tripMemoryJson: JSON.stringify(tripMemory ?? {}, null, 2),
-        groupRecentMessages: groupRecent,
-        privateRecentMessages: historyForPrompt,
-        ragChunks,
-      });
+      contextBlock = prependGraph(
+        agentPrivateContext({
+          participantName: ownerName,
+          profileJson: JSON.stringify(
+            ownerProfile
+              ? { display_name: ownerName, ...ownerProfile }
+              : { display_name: ownerName },
+            null,
+            2
+          ),
+          tripMemoryJson: JSON.stringify(tripMemory ?? {}, null, 2),
+          groupRecentMessages: groupRecent,
+          privateRecentMessages: historyForPrompt,
+          ragChunks,
+        })
+      );
     }
 
     const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
@@ -263,13 +390,9 @@ export async function runAgent(args: RunAgentArgs): Promise<void> {
           content: finalContent,
           thinking_state: "done",
         });
-        await supabase.from("ai_runs").insert({
-          trip_id: args.tripId,
+        await finalizeRun({
           kind: `agent.${mode}`,
-          input: { trigger: triggerMsg.content, turns: turn + 1 },
-          output: { content: finalContent },
-          duration_ms: Date.now() - t0,
-          model: getZaiModel(),
+          output: { content: finalContent, turns: turn + 1 },
         });
         return;
       }
@@ -319,13 +442,9 @@ export async function runAgent(args: RunAgentArgs): Promise<void> {
             content: result.content?.trim() || "The Research Agent has posted its findings above.",
             thinking_state: "done",
           });
-          await supabase.from("ai_runs").insert({
-            trip_id: args.tripId,
+          await finalizeRun({
             kind: `agent.${mode}`,
-            input: { trigger: triggerMsg.content, turns: turn + 1 },
-            output: { content: "Delegated to research subagent" },
-            duration_ms: Date.now() - t0,
-            model: getZaiModel(),
+            output: { content: "Delegated to research subagent", turns: turn + 1 },
           });
           return;
         }
@@ -346,14 +465,10 @@ export async function runAgent(args: RunAgentArgs): Promise<void> {
       content: "Sorry, I hit an error. Try rephrasing?",
       thinking_state: "failed",
     });
-    await supabase.from("ai_runs").insert({
-      trip_id: args.tripId,
+    await finalizeRun({
       kind: "agent.error",
-      input: { triggerMessageId: args.triggerMessageId },
       output: null,
       error: msg,
-      duration_ms: Date.now() - t0,
-      model: null,
     });
   }
 }
